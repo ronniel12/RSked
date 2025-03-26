@@ -1,0 +1,1997 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RSked Solver</title>
+  <script src="https://cdn.jsdelivr.net/npm/vue@2.6.14/dist/vue.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/vuetify@2.5.8/dist/vuetify.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/crypto-es/dist/crypto-es.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dexie@3.0.3/dist/dexie.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/moment@2.29.1/moment.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.17.0/dist/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/vuedraggable@2.24.3/dist/vuedraggable.min.js"></script>
+  <link href="https://cdn.jsdelivr.net/npm/vuetify@2.5.8/dist/vuetify.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/@mdi/font@6.5.95/css/materialdesignicons.min.css" rel="stylesheet">
+  <link rel="icon" href="/favicon.ico" type="image/x-icon">
+
+  <style>
+    [v-cloak] { display: none; }
+    .v-application { background-color: #f5f5f5 !important; }
+    .v-main { padding: 64px 0 0 0 !important; }
+    .schedule-table { border-collapse: collapse; width: 100%; }
+    .schedule-table th, .schedule-table td { border: 1px solid #ddd; padding: 8px; text-align: center; }
+    .schedule-table th { background-color: #f2f2f2; }
+    .schedule-container { overflow-x: auto; max-width: 100%; }
+    .debug-info { background-color: #f0f0f0; padding: 10px; margin-top: 20px; border-radius: 4px; }
+    .debug-info pre { white-space: pre-wrap; word-wrap: break-word; }
+    .violation-report { background-color: #fff3e0; padding: 15px; margin-top: 20px; border-radius: 4px; border: 1px solid #ffcc80; }
+    .violation-report h3 { color: #e65100; margin-top: 0; }
+    .violation-item { margin-bottom: 10px; padding: 5px; background-color: #fff; border-radius: 3px; }
+    .draggable-shift { cursor: grab; margin-bottom: 8px; padding: 8px; background-color: #fff; border-radius: 4px; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1); }
+    .draggable-shift:hover { background-color: #f5f5f5; }
+    .delete-btn { margin-left: 8px; }
+    .day-type {
+      color: #666;
+      font-style: italic;
+    }
+    .shift-entry {
+      margin: 2px 0;
+      padding: 2px;
+      background-color: #f5f5f5;
+      border-radius: 3px;
+    }
+    .day-marker {
+      margin: 2px 0;
+      padding: 2px;
+      border-radius: 3px;
+    }
+    .preferred-marker {
+      color: #2e7d32;
+      font-weight: 500;
+    }
+    .missed-preference {
+      color: #d32f2f;
+      font-weight: 500;
+    }
+    .vacation-marker {
+      color: #1976d2;
+      font-weight: 500;
+      background-color: #e3f2fd;
+      padding: 2px 4px;
+      border-radius: 3px;
+    }
+    .time-off-marker {
+      color: #7b1fa2;
+      font-weight: 500;
+      background-color: #f3e5f5;
+      padding: 2px 4px;
+      border-radius: 3px;
+    }
+    .day-off-marker {
+      color: #7b1fa2;
+      font-weight: 500;
+      background-color: #f3e5f5;
+      padding: 2px 4px;
+      border-radius: 3px;
+    }
+  </style>
+</head>
+<body>
+<div id="app" v-cloak>
+  <v-app>
+    <v-app-bar app color="primary" dark>
+      <v-app-bar-nav-icon @click="drawer = !drawer"></v-app-bar-nav-icon>
+      <v-img src="favicon.png" alt="RSked Solver Logo" contain max-height="40" max-width="40" class="mr-3"></v-img>
+      <v-toolbar-title>RSked Solver</v-toolbar-title>
+      <v-spacer></v-spacer>
+      <v-btn icon><v-icon>mdi-magnify</v-icon></v-btn>
+      <v-btn icon><v-icon>mdi-account</v-icon></v-btn>
+    </v-app-bar>
+
+    <v-navigation-drawer v-model="drawer" app>
+      <v-list>
+        <v-list-item @click="currentView = 'dashboard'"><v-list-item-icon><v-icon>mdi-view-dashboard</v-icon></v-list-item-icon><v-list-item-title>Dashboard</v-list-item-title></v-list-item>
+        <v-list-item @click="currentView = 'settings'"><v-list-item-icon><v-icon>mdi-cog-outline</v-icon></v-list-item-icon><v-list-item-title>Settings</v-list-item-title></v-list-item>
+        <v-list-item @click="currentView = 'contract-type'"><v-list-item-icon><v-icon>mdi-file-document-outline</v-icon></v-list-item-icon><v-list-item-title>Contract Type</v-list-item-title></v-list-item>
+            <v-list-item @click="currentView = 'shifts'"><v-list-item-icon><v-icon>mdi-clock-outline</v-icon></v-list-item-icon><v-list-item-title>Shift Management</v-list-item-title></v-list-item>
+        <v-list-item @click="currentView = 'skills'"><v-list-item-icon><v-icon>mdi-school</v-icon></v-list-item-icon><v-list-item-title>Skill Management</v-list-item-title></v-list-item>
+        <v-list-item @click="currentView = 'employees'"><v-list-item-icon><v-icon>mdi-account-group</v-icon></v-list-item-icon><v-list-item-title>Employee Management</v-list-item-title></v-list-item>
+        <v-list-item @click="currentView = 'requests'"><v-list-item-icon><v-icon>mdi-calendar-clock</v-icon></v-list-item-icon><v-list-item-title>Request Management</v-list-item-title></v-list-item>
+        <v-list-item @click="currentView = 'roster'"><v-list-item-icon><v-icon>mdi-calendar-range</v-icon></v-list-item-icon><v-list-item-title>Roster Management</v-list-item-title></v-list-item>
+        
+      </v-list>
+    </v-navigation-drawer>
+
+    <v-main>
+      <v-container fluid>
+        <component :is="currentView"></component>
+      </v-container>
+    </v-main>
+  </v-app>
+</div>
+
+<script>
+// Initialize Dexie
+const db = new Dexie('RosteringDB');
+db.version(1).stores({
+  employees: '++id, name, skills, position, contractId',
+  shifts: '++id, name, tasks',
+  requests: '++id, employee, type, dates, details, status, shiftPreference',
+  schedules: '++id, startDate, duration, schedule',
+  skills: '++id, name',
+  contracts: '++id, name, minHours, maxHours, unitDays',
+  settings: '++id, selectedDates'
+});
+
+const Dashboard = {
+  template: `
+    <v-card>
+      <v-card-title>Dashboard</v-card-title>
+      <v-card-text>
+        <p>Welcome to the RSked Solver dashboard.</p>
+        <v-row>
+          <v-col cols="12" md="6">
+            <v-card outlined>
+              <v-card-title>Quick Stats</v-card-title>
+              <v-card-text>
+                <p>Total Employees: {{ totalEmployees }}</p>
+                <p>Active Shifts: {{ activeShifts }}</p>
+                <p>Pending Requests: {{ pendingRequests }}</p>
+              </v-card-text>
+            </v-card>
+          </v-col>
+          <v-col cols="12" md="6">
+            <v-card outlined>
+              <v-card-title>Upcoming Shifts</v-card-title>
+              <v-card-text>
+                <v-list dense>
+                  <v-list-item v-for="shift in upcomingShifts" :key="shift.id">
+                    <v-list-item-content>
+                      <v-list-item-title>{{ shift.name }}</v-list-item-title>
+                      <v-list-item-subtitle>{{ shift.time }}</v-list-item-subtitle>
+                    </v-list-item-content>
+                  </v-list-item>
+                </v-list>
+              </v-card-text>
+            </v-card>
+          </v-col>
+        </v-row>
+      </v-card-text>
+    </v-card>
+  `,
+  data() {
+    return {
+      totalEmployees: 0,
+      activeShifts: 0,
+      pendingRequests: 0,
+      upcomingShifts: []
+    }
+  },
+  created() {
+    this.fetchDashboardData();
+  },
+  methods: {
+    async fetchDashboardData() {
+      this.totalEmployees = await db.employees.count();
+      this.activeShifts = await db.shifts.count();
+      this.pendingRequests = await db.requests.where('status').equals('Pending').count();
+      this.upcomingShifts = await db.shifts.toArray();
+    }
+  }
+};
+
+const ContractTypeManagement = {
+  data() {
+    return {
+      contracts: [],
+      dialog: false,
+      headers: [
+        { text: 'Contract Name', value: 'name' },
+        { text: 'Min Hours', value: 'minHours' },
+        { text: 'Max Hours', value: 'maxHours' },
+        { text: 'Unit Days', value: 'unitDays' },
+        { text: 'Actions', value: 'actions', sortable: false }
+      ],
+      editedIndex: -1,
+      editedItem: { name: '', minHours: 0, maxHours: 0, unitDays: 0 },
+      defaultItem: { name: '', minHours: 0, maxHours: 0, unitDays: 0 },
+      search: ''
+    }
+  },
+  created() {
+    this.fetchContracts();
+  },
+  methods: {
+    async fetchContracts() {
+      this.contracts = await db.contracts.toArray();
+    },
+    editItem(item) {
+      this.editedIndex = this.contracts.indexOf(item);
+      this.editedItem = Object.assign({}, item);
+      this.dialog = true;
+    },
+    async deleteItem(item) {
+      const index = this.contracts.indexOf(item);
+      if (confirm('Are you sure you want to delete this contract?')) {
+        await db.contracts.delete(item.id);
+        this.contracts.splice(index, 1);
+      }
+    },
+    close() {
+      this.dialog = false;
+      this.$nextTick(() => {
+        this.editedItem = Object.assign({}, this.defaultItem);
+        this.editedIndex = -1;
+      });
+    },
+    async save() {
+      try {
+        if (this.editedIndex > -1) {
+          await db.contracts.update(this.editedItem.id, this.editedItem);
+          Object.assign(this.contracts[this.editedIndex], this.editedItem);
+        } else {
+          const id = await db.contracts.add(this.editedItem);
+          this.editedItem.id = id;
+          this.contracts.push(this.editedItem);
+        }
+        this.close();
+      } catch (error) {
+        console.error('Error saving contract:', error);
+        alert('An error occurred while saving. Please try again.');
+      }
+    }
+  },
+  template: `
+    <v-card>
+      <v-card-title>Contract Type Management</v-card-title>
+      <v-data-table :headers="headers" :items="contracts" :search="search" class="elevation-1">
+        <template v-slot:top>
+          <v-toolbar flat>
+            <v-toolbar-title>Contracts</v-toolbar-title>
+            <v-divider class="mx-4" inset vertical></v-divider>
+            <v-spacer></v-spacer>
+            <v-dialog v-model="dialog" max-width="500px">
+              <template v-slot:activator="{ on, attrs }">
+                <v-btn color="primary" dark class="mb-2" v-bind="attrs" v-on="on">New Contract</v-btn>
+              </template>
+              <v-card>
+                <v-card-title><span class="text-h5">{{ editedIndex === -1 ? 'New Contract' : 'Edit Contract' }}</span></v-card-title>
+                <v-card-text>
+                  <v-container>
+                    <v-row>
+                      <v-col cols="12" sm="6"><v-text-field v-model="editedItem.name" label="Contract Name"></v-text-field></v-col>
+                      <v-col cols="12" sm="6"><v-text-field v-model="editedItem.minHours" label="Minimum Hours" type="number"></v-text-field></v-col>
+                      <v-col cols="12" sm="6"><v-text-field v-model="editedItem.maxHours" label="Maximum Hours" type="number"></v-text-field></v-col>
+                      <v-col cols="12" sm="6"><v-text-field v-model="editedItem.unitDays" label="Unit Days" type="number"></v-text-field></v-col>
+                    </v-row>
+                  </v-container>
+                </v-card-text>
+                <v-card-actions>
+                  <v-spacer></v-spacer>
+                  <v-btn color="blue darken-1" text @click="close">Cancel</v-btn>
+                  <v-btn color="blue darken-1" text @click="save">Save</v-btn>
+                </v-card-actions>
+              </v-card>
+            </v-dialog>
+          </v-toolbar>
+        </template>
+        <template v-slot:item.actions="{ item }">
+          <v-icon small class="mr-2" @click="editItem(item)">mdi-pencil</v-icon>
+          <v-icon small @click="deleteItem(item)">mdi-delete</v-icon>
+        </template>
+      </v-data-table>
+    </v-card>
+  `
+};
+
+const SettingsManagement = {
+  data() {
+    return {
+      selectedDates: [],
+      closedDays: [],
+      dateMenu: false,
+      search: ''
+    };
+  },
+  created() {
+    this.fetchSettings();
+  },
+  methods: {
+    async fetchSettings() {
+      const settings = await db.settings.toArray();
+      if (settings.length > 0) {
+        this.selectedDates = settings[0].selectedDates;
+        this.closedDays = settings[0].selectedDates;
+      }
+    },
+    async saveSettings() {
+      await db.settings.clear();
+      await db.settings.add({ selectedDates: this.selectedDates });
+      this.closedDays = this.selectedDates;
+      alert('Settings saved successfully!');
+    },
+    removeClosedDay(date) {
+      this.selectedDates = this.selectedDates.filter(d => d !== date);
+      this.closedDays = this.selectedDates;
+    }
+  },
+  template: `
+    <v-card>
+      <v-card-title>Settings</v-card-title>
+      <v-card-text>
+        <v-row>
+          <v-col cols="12" sm="6">
+            <v-menu v-model="dateMenu" :close-on-content-click="false" :nudge-right="40" transition="scale-transition" offset-y min-width="auto">
+              <template v-slot:activator="{ on, attrs }">
+                <v-text-field v-model="selectedDates" label="Selected Dates" prepend-icon="mdi-calendar" readonly v-bind="attrs" v-on="on"></v-text-field>
+              </template>
+              <v-date-picker v-model="selectedDates" @input="dateMenu = false" multiple></v-date-picker>
+            </v-menu>
+          </v-col>
+        </v-row>
+        <v-btn @click="saveSettings" color="primary" class="mb-4">Save Settings</v-btn>
+        <v-card v-if="closedDays.length > 0" class="mt-4">
+          <v-card-title>Closed Days</v-card-title>
+          <v-card-text>
+            <v-list>
+              <v-list-item v-for="(date, index) in closedDays" :key="index">
+                <v-list-item-content><v-list-item-title>{{ date }}</v-list-item-title></v-list-item-content>
+                <v-list-item-action><v-btn icon @click="removeClosedDay(date)"><v-icon>mdi-delete</v-icon></v-btn></v-list-item-action>
+              </v-list-item>
+            </v-list>
+          </v-card-text>
+        </v-card>
+      </v-card-text>
+    </v-card>
+  `
+};
+
+const EmployeeManagement = {
+  data() {
+    return {
+      employees: [],
+      dialog: false,
+      headers: [
+        { text: 'Name', value: 'name' },
+        { text: 'Skills', value: 'skills' },
+        { text: 'Position', value: 'position' },
+        { text: 'Contract', value: 'contractId' },
+        { text: 'Actions', value: 'actions', sortable: false }
+      ],
+      editedIndex: -1,
+      editedItem: { name: '', skills: [], position: '', contractId: null },
+      defaultItem: { name: '', skills: [], position: '', contractId: null },
+      positions: ['Employee', 'Supervisor'],
+      skillOptions: [],
+      contractOptions: []
+    }
+  },
+  created() {
+    this.fetchEmployees();
+    this.fetchSkills();
+    this.fetchContracts();
+  },
+  methods: {
+    async fetchEmployees() {
+      this.employees = await db.employees.toArray();
+    },
+    async fetchSkills() {
+      const skills = await db.skills.toArray();
+      this.skillOptions = skills.map(skill => skill.name);
+    },
+    async fetchContracts() {
+      const contracts = await db.contracts.toArray();
+      this.contractOptions = contracts.map(contract => ({ text: contract.name, value: contract.id }));
+    },
+    editItem(item) {
+      this.editedIndex = this.employees.indexOf(item);
+      this.editedItem = Object.assign({}, item);
+      this.dialog = true;
+    },
+    async deleteItem(item) {
+      const index = this.employees.indexOf(item);
+      if (confirm('Are you sure you want to delete this employee?')) {
+        await db.employees.delete(item.id);
+        this.employees.splice(index, 1);
+      }
+    },
+    close() {
+      this.dialog = false;
+      this.$nextTick(() => {
+        this.editedItem = Object.assign({}, this.defaultItem);
+        this.editedIndex = -1;
+      });
+    },
+    async save() {
+      try {
+        if (this.editedIndex > -1) {
+          await db.employees.update(this.editedItem.id, this.editedItem);
+          Object.assign(this.employees[this.editedIndex], this.editedItem);
+        } else {
+          const id = await db.employees.add(this.editedItem);
+          this.editedItem.id = id;
+          this.employees.push(this.editedItem);
+        }
+        this.close();
+      } catch (error) {
+        console.error('Error saving employee:', error);
+        alert('An error occurred while saving. Please try again.');
+      }
+    }
+  },
+  template: `
+    <v-card>
+      <v-card-title>Employee Management</v-card-title>
+      <v-data-table :headers="headers" :items="employees" :search="search" class="elevation-1">
+        <template v-slot:top>
+          <v-toolbar flat>
+            <v-toolbar-title>Employees</v-toolbar-title>
+            <v-divider class="mx-4" inset vertical></v-divider>
+            <v-spacer></v-spacer>
+            <v-dialog v-model="dialog" max-width="500px">
+              <template v-slot:activator="{ on, attrs }">
+                <v-btn color="primary" dark class="mb-2" v-bind="attrs" v-on="on">New Employee</v-btn>
+              </template>
+              <v-card>
+                <v-card-title><span class="text-h5">{{ editedIndex === -1 ? 'New Employee' : 'Edit Employee' }}</span></v-card-title>
+                <v-card-text>
+                  <v-container>
+                    <v-row>
+                      <v-col cols="12" sm="6" md="4"><v-text-field v-model="editedItem.name" label="Employee name"></v-text-field></v-col>
+                      <v-col cols="12" sm="6" md="4"><v-select v-model="editedItem.skills" :items="skillOptions" label="Skills" multiple chips></v-select></v-col>
+                      <v-col cols="12" sm="6" md="4"><v-select v-model="editedItem.position" :items="positions" label="Position"></v-select></v-col>
+                      <v-col cols="12" sm="6" md="4"><v-select v-model="editedItem.contractId" :items="contractOptions" label="Contract" item-text="text" item-value="value"></v-select></v-col>
+                    </v-row>
+                  </v-container>
+                </v-card-text>
+                <v-card-actions>
+                  <v-spacer></v-spacer>
+                  <v-btn color="blue darken-1" text @click="close">Cancel</v-btn>
+                  <v-btn color="blue darken-1" text @click="save">Save</v-btn>
+                </v-card-actions>
+              </v-card>
+            </v-dialog>
+          </v-toolbar>
+        </template>
+        <template v-slot:item.actions="{ item }">
+          <v-icon small class="mr-2" @click="editItem(item)">mdi-pencil</v-icon>
+          <v-icon small @click="deleteItem(item)">mdi-delete</v-icon>
+        </template>
+      </v-data-table>
+    </v-card>
+  `
+};
+
+const ShiftManagement = {
+  data() {
+    return {
+      shifts: [],
+      dialog: false,
+      headers: [
+        { text: 'Shift Name', value: 'name' },
+        { text: 'Tasks', value: 'tasks', sortable: false },
+        { text: 'Actions', value: 'actions', sortable: false }
+      ],
+      editedIndex: -1,
+      editedItem: { name: '', tasks: [] },
+      defaultItem: { name: '', tasks: [] },
+      days: ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'],
+      skillOptions: []
+    }
+  },
+  created() {
+    this.fetchShifts();
+    this.fetchSkills();
+  },
+  methods: {
+    async fetchShifts() {
+      this.shifts = await db.shifts.toArray();
+    },
+    async fetchSkills() {
+      const skills = await db.skills.toArray();
+      this.skillOptions = skills.map(skill => skill.name);
+    },
+    editItem(item) {
+      this.editedIndex = this.shifts.indexOf(item);
+      this.editedItem = JSON.parse(JSON.stringify(item));
+      this.dialog = true;
+    },
+    async deleteItem(item) {
+      const index = this.shifts.indexOf(item);
+      if (confirm('Are you sure you want to delete this shift?')) {
+        await db.shifts.delete(item.id);
+        this.shifts.splice(index, 1);
+      }
+    },
+    close() {
+      this.dialog = false;
+      this.$nextTick(() => {
+        this.editedItem = Object.assign({}, this.defaultItem);
+        this.editedIndex = -1;
+      });
+    },
+    async save() {
+      try {
+        if (this.editedIndex > -1) {
+          await db.shifts.update(this.editedItem.id, this.editedItem);
+          Object.assign(this.shifts[this.editedIndex], this.editedItem);
+        } else {
+          const id = await db.shifts.add(this.editedItem);
+          this.editedItem.id = id;
+          this.shifts.push(this.editedItem);
+        }
+        this.close();
+      } catch (error) {
+        console.error('Error saving shift:', error);
+        alert('An error occurred while saving. Please try again.');
+      }
+    },
+    addTask() {
+    if (!this.editedItem.tasks) this.editedItem.tasks = [];
+    this.editedItem.tasks.push({ 
+      name: '', 
+      skill_requirement: '', // Changed from skillRequirement
+      schedule: this.days.map(day => ({ day, startTime: '', endTime: '' })) 
+    });
+    this.$forceUpdate();
+    },
+
+    removeTask(index) {
+      if (this.editedItem.tasks && this.editedItem.tasks.length > index) {
+        this.editedItem.tasks.splice(index, 1);
+        this.$forceUpdate();
+      }
+    },
+    formatTasks(tasks) {
+      if (!tasks || !Array.isArray(tasks)) return '';
+      return tasks.map(task => `${task.name} (${task.schedule.map(s => `${s.day}: ${s.startTime}-${s.endTime}`).join(', ')})`).join(', ');
+    }
+  },
+  template: `
+    <v-card>
+      <v-card-title>Shift Management</v-card-title>
+      <v-data-table :headers="headers" :items="shifts" :search="search" class="elevation-1">
+        <template v-slot:top>
+          <v-toolbar flat>
+            <v-toolbar-title>Shifts</v-toolbar-title>
+            <v-divider class="mx-4" inset vertical></v-divider>
+            <v-spacer></v-spacer>
+            <v-dialog v-model="dialog" max-width="800px">
+              <template v-slot:activator="{ on, attrs }">
+                <v-btn color="primary" dark class="mb-2" v-bind="attrs" v-on="on">New Shift</v-btn>
+              </template>
+              <v-card>
+                <v-card-title><span class="text-h5">{{ editedIndex === -1 ? 'New Shift' : 'Edit Shift' }}</span></v-card-title>
+                <v-card-text>
+                  <v-container>
+                    <v-row>
+                      <v-col cols="12" sm="6"><v-text-field v-model="editedItem.name" label="Shift name"></v-text-field></v-col>
+                    </v-row>
+                    <v-row v-for="(task, taskIndex) in editedItem.tasks" :key="taskIndex">
+                      <v-col cols="12" sm="3"><v-text-field v-model="task.name" label="Task name"></v-text-field></v-col>
+                      <v-col cols="12" sm="3"><v-select v-model="task.skill_requirement" :items="skillOptions" label="Skill requirement"></v-select></v-col>
+                      <v-col cols="12">
+                        <v-simple-table>
+                          <template v-slot:default>
+                            <thead><tr><th>Day</th><th>Start Time</th><th>End Time</th></tr></thead>
+                            <tbody>
+                              <tr v-for="(schedule, scheduleIndex) in task.schedule" :key="scheduleIndex">
+                                <td>{{ schedule.day }}</td>
+                                <td><v-text-field v-model="schedule.startTime" type="time" label="Start time" dense></v-text-field></td>
+                                <td><v-text-field v-model="schedule.endTime" type="time" label="End time" dense></v-text-field></td>
+                              </tr>
+                            </tbody>
+                          </template>
+                        </v-simple-table>
+                      </v-col>
+                      <v-col cols="12" sm="1"><v-btn icon @click="removeTask(taskIndex)"><v-icon>mdi-delete</v-icon></v-btn></v-col>
+                    </v-row>
+                    <v-row><v-col cols="12"><v-btn color="primary" @click="addTask">Add Task</v-btn></v-col></v-row>
+                  </v-container>
+                </v-card-text>
+                <v-card-actions>
+                  <v-spacer></v-spacer>
+                  <v-btn color="blue darken-1" text @click="close">Cancel</v-btn>
+                  <v-btn color="blue darken-1" text @click="save">Save</v-btn>
+                </v-card-actions>
+              </v-card>
+            </v-dialog>
+          </v-toolbar>
+        </template>
+        <template v-slot:item.tasks="{ item }">{{ formatTasks(item.tasks) }}</template>
+        <template v-slot:item.actions="{ item }">
+          <v-icon small class="mr-2" @click="editItem(item)">mdi-pencil</v-icon>
+          <v-icon small @click="deleteItem(item)">mdi-delete</v-icon>
+        </template>
+      </v-data-table>
+    </v-card>
+  `
+};
+
+const RosterManagement = {
+  data() {
+    return {
+      employees: [],
+      shifts: [],
+      requests: [],
+      contracts: [],
+      closedDays: [],
+      startDate: new Date().toISOString().substr(0, 10),
+      duration: 21,
+      timeLimit: 60,
+      isLoading: false,
+      generatedSchedule: null,
+      errorMessage: null,
+      scheduleHeaders: [],
+      scheduleItems: [],
+      showSchedule: false,
+      summaryData: {
+        totalManHours: 0,
+        dailyManHours: {},
+        employeeHours: {}
+      },
+      violations: [],
+      shiftEditorDialog: false,
+      currentEmployee: null,
+      currentDate: null,
+      currentShift: null,
+      currentShiftIndex: null,
+      availableShifts: [],
+      availableTasks: {},
+      editedShift: { shift: '', task: '', start: '', end: '', duration_hours: 0 }
+    };
+  },
+  mounted() {
+    this.fetchData();
+  },
+  computed: {
+    formattedDailyManHours() {
+      return Object.entries(this.summaryData.dailyManHours).map(([date, hours]) => {
+        const dayName = new Date(date).toLocaleDateString('en-US', { weekday: 'long' });
+        return { date: `${date} (${dayName})`, hours };
+      });
+    }
+  },
+  methods: {
+    async fetchData() {
+      try {
+        [this.employees, this.shifts, this.requests, this.contracts] = await Promise.all([
+          db.employees.toArray(),
+          db.shifts.toArray(),
+          db.requests.toArray(),
+          db.contracts.toArray()
+        ]);
+        
+        const settings = await db.settings.toArray();
+        this.closedDays = settings.length > 0 ? settings[0].selectedDates : [];
+      } catch (error) {
+        console.error('Data fetch error:', error);
+        this.errorMessage = 'Failed to load required data';
+      }
+    },
+
+    async generateSchedule() {
+      this.isLoading = true;
+      this.errorMessage = null;
+      this.generatedSchedule = null;
+
+      try {
+        const solverData = await this.prepareSolverInput();
+        const response = await axios.post('/api/generate-schedule', {
+          employees: solverData.employees,
+          shifts: solverData.shifts,
+          closed_days: solverData.closed_days,
+          start_date: solverData.start_date,
+          schedule_days: solverData.schedule_days
+        }, {
+          timeout: 120000
+        });
+        
+        console.log('Backend Response:', response.data);
+        console.log('Raw hours data:', response.data.summary?.total_hours_per_employee);
+        
+        // Temporary debug - map employee hours with fallback
+        const debugHours = {};
+        this.employees.forEach(emp => {
+            debugHours[emp.name] = response.data.summary?.total_hours_per_employee?.[emp.name] || 0;
+        });
+        console.log('Processed employee hours:', debugHours);
+        
+        this.processSchedule(response.data);
+        await this.saveScheduleToDB(response.data.schedule);
+        this.showSchedule = true;
+      } catch (error) {
+        console.error('Full error:', error);
+        this.errorMessage = this.formatErrorMessage(error);
+        if (error.response) {
+          console.error('Server response:', error.response.data);
+          this.errorMessage = `Server error: ${error.response.data.detail || 'Unknown error'}`;
+        } else if (error.request) {
+          this.errorMessage = "No response from server";
+        } else {
+          this.errorMessage = `Request setup failed: ${error.message}`;
+        }
+      } finally {
+        this.isLoading = false;
+      }
+    },
+
+    formatErrorMessage(error) {
+      if (error.response?.data?.error) {
+        return `Server Error: ${error.response.data.error}`;
+      }
+      if (error.message.includes('timeout')) {
+        return 'Generation timed out - try reducing schedule duration';
+      }
+      return error.message || 'Unknown error occurred';
+    },
+
+    async prepareSolverInput() {
+  try {
+    // Initialize days array first
+    this.days = [];
+    const startDate = new Date(this.startDate);
+    for (let i = 0; i < this.duration; i++) {
+      const date = new Date(startDate);
+      date.setDate(startDate.getDate() + i);
+      this.days.push(date);
+    }
+
+    const [employees, shifts, requests, contracts] = await Promise.all([
+      db.employees.toArray().catch(() => []),
+      db.shifts.toArray().catch(() => []),
+      db.requests.toArray().catch(() => []),
+      db.contracts.toArray().catch(() => [])
+    ]);
+
+    const processedEmployees = (employees || []).map(emp => {
+      // Process all approved requests
+      const employeeRequests = (requests || []).filter(r => 
+        r.employee === emp.name && 
+        r.status === 'Approved'
+      );
+
+      // Handle time off/vacation requests
+      const days_off = employeeRequests
+        .filter(r => ['Vacation Leave', 'Time Off'].includes(r.type))
+        .flatMap(r => r.dates || []);
+
+      // Handle shift preferences
+      const preferred_shifts_by_date = {};
+      employeeRequests
+        .filter(r => r.type === 'Shift Preference')
+        .forEach(r => {
+          (r.dates || []).forEach(date => {
+            preferred_shifts_by_date[date] = r.shiftPreference;
+          });
+        });
+
+      const contract = (contracts || []).find(c => c.id === emp.contractId) || {};
+      
+      // Send original contract hours without adjustment
+      return {
+        name: emp.name || 'Unknown',
+        skills: Array.isArray(emp.skills) ? emp.skills : [],
+        position: (emp.position || 'employee').toLowerCase(),
+        contract: {
+          minHours: parseInt(contract.minHours) || 0,
+          maxHours: parseInt(contract.maxHours) || 40,
+          unitDays: contract.unitDays
+        },
+        days_off: [...new Set(days_off)],  // Deduplicated dates
+        available_days: (this.days || [])
+          .filter(day => !days_off.includes(day?.isoformat?.() || new Date(day).toISOString().split('T')[0]))
+          .map(day => day?.isoformat?.() || new Date(day).toISOString().split('T')[0]),
+        preferred_shifts_by_date,
+        requests: employeeRequests,  // Send all approved requests
+      };
+    });
+
+    const processedShifts = (shifts || []).map(shift => ({
+      name: shift.name || 'Unnamed Shift',
+      tasks: (shift.tasks || []).map(task => ({
+        name: task.name || 'Unnamed Task',
+        skill_requirement: task.skill_requirement || task.skillRequirement || 'general',
+        schedule: (task.schedule || []).map(sched => ({
+          day: sched.day || 'Monday',
+          startTime: sched.startTime || '00:00',
+          endTime: sched.endTime || '00:00'
+        }))
+      }))
+    }));
+
+    return {
+      employees: processedEmployees,
+      shifts: processedShifts,
+      closed_days: Array.isArray(this.closedDays) ? this.closedDays : [],
+      start_date: this.startDate,
+      schedule_days: this.duration
+    };
+  } catch (error) {
+    console.error('Data preparation error:', error);
+    throw error;
+  }
+},
+
+
+    processSchedule(scheduleData) {
+      // Temporary validation
+      console.log('Received contract data verification:',
+          this.employees.map(emp => ({
+              name: emp.name,
+              contract: emp.contract
+          }))
+      );
+
+      const dateHeaders = [];
+      const startDate = new Date(this.startDate);
+      
+      // Fix date generation using UTC to avoid timezone issues
+      const utcStartDate = new Date(Date.UTC(
+          startDate.getUTCFullYear(),
+          startDate.getUTCMonth(),
+          startDate.getUTCDate()
+      ));
+
+      for (let i = 0; i < this.duration; i++) {
+          const currentDate = new Date(utcStartDate);
+          currentDate.setUTCDate(utcStartDate.getUTCDate() + i);
+          const dateString = currentDate.toISOString().split('T')[0];
+          const dayName = currentDate.toLocaleDateString('en-US', { 
+              weekday: 'long',
+              timeZone: 'UTC'  // Force weekday calculation in UTC
+          });
+          dateHeaders.push({
+              text: `${dateString} (${dayName})`,
+              value: dateString
+          });
+      }
+
+      this.scheduleHeaders = [
+        { 
+          text: 'Employee', 
+          value: 'employee',
+          sortable: true,
+          sort: (a, b) => b._total - a._total
+        },
+        ...dateHeaders
+      ];
+
+      this.summaryData = {
+        totalManHours: scheduleData.summary?.total_man_hours || 0,
+        dailyManHours: scheduleData.summary?.daily_man_hours || {},
+        employeeHours: scheduleData.summary?.total_hours_per_employee || {}
+      };
+
+      this.violations = scheduleData.violations || [];
+
+      // Updated schedule processing
+      this.scheduleItems = Object.entries(scheduleData.schedule).map(([empName, shifts]) => {
+        const totalHours = this.summaryData.employeeHours[empName] || 0;
+        const employee = this.employees.find(e => e.name === empName) || {};
+        
+        // Get precomputed vacation days from backend data
+        const vacationDays = new Set(employee.vacation_days || []);
+        const timeOffDays = new Set(employee.time_off_days || []);
+        
+        const employeeSchedule = { 
+          employee: `${empName} (Total: ${totalHours}h)`,
+          _total: totalHours
+        };
+
+        dateHeaders.forEach(header => {
+          const dateShifts = shifts[header.value];
+          
+          // Should check backend data first
+          if (dateShifts && dateShifts.some(entry => entry === 'VACATION')) {
+              employeeSchedule[header.value] = ['VACATION'];
+          } else if (dateShifts && dateShifts.some(entry => entry === 'TIME OFF')) {
+              employeeSchedule[header.value] = ['TIME OFF'];
+          } else if (vacationDays.has(header.value)) {
+              employeeSchedule[header.value] = ['VACATION'];
+          } else if (timeOffDays.has(header.value)) {
+              employeeSchedule[header.value] = ['TIME OFF'];
+          } else {
+              employeeSchedule[header.value] = dateShifts || 'OFF';
+          }
+          
+          // Calculate hours for each day if needed
+          if (dateShifts && Array.isArray(dateShifts)) {
+            employeeSchedule[header.value + '_hours'] = dateShifts.reduce((sum, shift) => sum + (shift.duration_hours || 0), 0);
+          }
+        });
+
+        return employeeSchedule;
+      });
+
+      console.log('Mapped employee hours:', this.summaryData.employeeHours);
+      
+      // Add sorting by total hours
+      this.scheduleHeaders[0].sort = (a, b) => b._total - a._total;
+    },
+
+    async saveScheduleToDB(schedule) {
+      await db.schedules.add({
+        startDate: this.startDate,
+        duration: this.duration,
+        generatedAt: new Date().toISOString(),
+        scheduleData: schedule
+      });
+    },
+
+    getViolationColor(type) {
+      const colors = {
+        'SUPERVISOR': 'error',
+        'CONSECUTIVE_DAYS': 'warning',
+        'CONTRACT_HOURS': 'info',
+        'PREFERENCE': 'primary'
+      };
+      return colors[type] || 'grey';
+    },
+
+    getViolationIcon(type) {
+      const icons = {
+        'SUPERVISOR': 'mdi-shield-alert',
+        'CONSECUTIVE_DAYS': 'mdi-calendar-alert',
+        'CONTRACT_HOURS': 'mdi-clock-alert',
+        'PREFERENCE': 'mdi-star-off'
+      };
+      return icons[type] || 'mdi-alert';
+    },
+
+    formatDate(dateStr) {
+      const date = new Date(dateStr);
+      return date.toLocaleDateString('en-US', {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric'
+      });
+    },
+
+    // Methods for manual schedule editing
+    async openShiftEditor(employee, date, shift, shiftIndex) {
+      // Extract employee name from display string (e.g., "John Doe (Total: 40h)")
+      const employeeName = employee.employee.split(' (')[0];
+      
+      this.currentEmployee = employeeName;
+      this.currentDate = date;
+      this.currentShift = shift;
+      this.currentShiftIndex = shiftIndex;
+      
+      // Load available shifts and tasks
+      await this.loadShiftsAndTasks();
+      
+      // Initialize edited shift with current values
+      this.editedShift = { ...shift };
+      
+      // Open the dialog
+      this.shiftEditorDialog = true;
+    },
+    
+    async loadShiftsAndTasks() {
+      try {
+        // Get all shifts
+        const shifts = await db.shifts.toArray();
+        this.availableShifts = shifts.map(s => s.name);
+        
+        // Create a map of shift name to tasks
+        this.availableTasks = {};
+        shifts.forEach(shift => {
+          this.availableTasks[shift.name] = shift.tasks.map(task => ({
+            name: task.name,
+            schedules: task.schedule
+          }));
+        });
+      } catch (error) {
+        console.error('Error loading shifts and tasks:', error);
+      }
+    },
+    
+    getTasksForShift(shiftName) {
+      return this.availableTasks[shiftName] || [];
+    },
+    
+    getScheduleForTask(shiftName, taskName) {
+      const tasks = this.availableTasks[shiftName] || [];
+      const task = tasks.find(t => t.name === taskName);
+      return task ? task.schedules : [];
+    },
+    
+    updateTaskTimes() {
+      if (!this.editedShift.shift || !this.editedShift.task) return;
+      
+      const tasks = this.getTasksForShift(this.editedShift.shift);
+      const task = tasks.find(t => t.name === this.editedShift.task);
+      
+      if (task && task.schedules) {
+        // Get the day of week for the current date
+        const date = new Date(this.currentDate);
+        const dayOfWeek = date.toLocaleDateString('en-US', { weekday: 'long' });
+        
+        // Find the schedule for this day
+        const schedule = task.schedules.find(s => s.day === dayOfWeek);
+        
+        if (schedule) {
+          this.editedShift.start = schedule.startTime;
+          this.editedShift.end = schedule.endTime;
+          
+          // Calculate duration in hours
+          const startTime = new Date(`2000-01-01T${schedule.startTime}`);
+          const endTime = new Date(`2000-01-01T${schedule.endTime}`);
+          const durationMs = endTime - startTime;
+          this.editedShift.duration_hours = Math.round(durationMs / (1000 * 60 * 60));
+        }
+      }
+    },
+    
+    async saveShiftChanges() {
+      try {
+        // Find the employee in the schedule items
+        const employeeIndex = this.scheduleItems.findIndex(item => 
+          item.employee.startsWith(this.currentEmployee)
+        );
+        
+        if (employeeIndex === -1) {
+          throw new Error(`Employee ${this.currentEmployee} not found in schedule`);
+        }
+        
+        // Get the current shifts for this employee on this date
+        const employee = this.scheduleItems[employeeIndex];
+        const shifts = employee[this.currentDate];
+        
+        if (!Array.isArray(shifts)) {
+          throw new Error(`No shifts array found for ${this.currentEmployee} on ${this.currentDate}`);
+        }
+        
+        // Update the shift
+        shifts[this.currentShiftIndex] = { ...this.editedShift };
+        
+        // Update the schedule in the database
+        await this.updateScheduleInDB(this.currentEmployee, this.currentDate, shifts);
+        
+        // Update the UI
+        this.$set(employee, this.currentDate, shifts);
+        
+        // Recalculate total hours
+        this.recalculateHours();
+        
+        // Close the dialog
+        this.shiftEditorDialog = false;
+      } catch (error) {
+        console.error('Error saving shift changes:', error);
+        alert(`Failed to save changes: ${error.message}`);
+      }
+    },
+    
+    async deleteShift() {
+      try {
+        // Find the employee in the schedule items
+        const employeeIndex = this.scheduleItems.findIndex(item => 
+          item.employee.startsWith(this.currentEmployee)
+        );
+        
+        if (employeeIndex === -1) {
+          throw new Error(`Employee ${this.currentEmployee} not found in schedule`);
+        }
+        
+        // Get the current shifts for this employee on this date
+        const employee = this.scheduleItems[employeeIndex];
+        let shifts = employee[this.currentDate];
+        
+        if (!Array.isArray(shifts)) {
+          throw new Error(`No shifts array found for ${this.currentEmployee} on ${this.currentDate}`);
+        }
+        
+        // Remove the shift
+        shifts = shifts.filter((_, index) => index !== this.currentShiftIndex);
+        
+        // If no shifts left, set to 'OFF'
+        if (shifts.length === 0) {
+          shifts = ['OFF'];
+        }
+        
+        // Update the schedule in the database
+        await this.updateScheduleInDB(this.currentEmployee, this.currentDate, shifts);
+        
+        // Update the UI
+        this.$set(employee, this.currentDate, shifts);
+        
+        // Recalculate total hours
+        this.recalculateHours();
+        
+        // Close the dialog
+        this.shiftEditorDialog = false;
+      } catch (error) {
+        console.error('Error deleting shift:', error);
+        alert(`Failed to delete shift: ${error.message}`);
+      }
+    },
+    
+    async addNewShift(employee, date) {
+      // Extract employee name from display string
+      const employeeName = employee.employee.split(' (')[0];
+      
+      this.currentEmployee = employeeName;
+      this.currentDate = date;
+      
+      // Initialize a new shift
+      this.editedShift = { 
+        shift: '', 
+        task: '', 
+        start: '', 
+        end: '', 
+        duration_hours: 0 
+      };
+      
+      // Load available shifts and tasks
+      await this.loadShiftsAndTasks();
+      
+      // Set current shift index to -1 to indicate a new shift
+      this.currentShiftIndex = -1;
+      
+      // Open the dialog
+      this.shiftEditorDialog = true;
+    },
+    
+    async saveNewShift() {
+      try {
+        // Find the employee in the schedule items
+        const employeeIndex = this.scheduleItems.findIndex(item => 
+          item.employee.startsWith(this.currentEmployee)
+        );
+        
+        if (employeeIndex === -1) {
+          throw new Error(`Employee ${this.currentEmployee} not found in schedule`);
+        }
+        
+        // Get the current shifts for this employee on this date
+        const employee = this.scheduleItems[employeeIndex];
+        let shifts = employee[this.currentDate];
+        
+        // If shifts is not an array or is 'OFF', initialize it
+        if (!Array.isArray(shifts) || (shifts.length === 1 && shifts[0] === 'OFF')) {
+          shifts = [];
+        }
+        
+        // Add the new shift
+        shifts.push({ ...this.editedShift });
+        
+        // Update the schedule in the database
+        await this.updateScheduleInDB(this.currentEmployee, this.currentDate, shifts);
+        
+        // Update the UI
+        this.$set(employee, this.currentDate, shifts);
+        
+        // Recalculate total hours
+        this.recalculateHours();
+        
+        // Close the dialog
+        this.shiftEditorDialog = false;
+      } catch (error) {
+        console.error('Error adding new shift:', error);
+        alert(`Failed to add shift: ${error.message}`);
+      }
+    },
+    
+    async updateScheduleInDB(employeeName, date, shifts) {
+      try {
+        // Get the latest schedule from the database
+        const latestSchedule = await db.schedules.orderBy('id').last();
+        
+        if (!latestSchedule) {
+          throw new Error('No schedule found in database');
+        }
+        
+        // Update the schedule data
+        if (!latestSchedule.scheduleData[employeeName]) {
+          latestSchedule.scheduleData[employeeName] = {};
+        }
+        
+        latestSchedule.scheduleData[employeeName][date] = shifts;
+        
+        // Save back to the database
+        await db.schedules.update(latestSchedule.id, {
+          scheduleData: latestSchedule.scheduleData
+        });
+        
+        // Also update the backend via API
+        await axios.put('/api/update-schedule', {
+          employee: employeeName,
+          date: date,
+          shift: shifts
+        });
+        
+        console.log('Schedule updated successfully');
+      } catch (error) {
+        console.error('Error updating schedule in DB:', error);
+        throw error;
+      }
+    },
+    
+    recalculateHours() {
+      // Recalculate total hours for each employee
+      this.scheduleItems.forEach(employee => {
+        let totalHours = 0;
+        
+        // Extract employee name
+        const employeeName = employee.employee.split(' (')[0];
+        
+        // Calculate hours for each day
+        this.scheduleHeaders.slice(1).forEach(header => {
+          const dateShifts = employee[header.value];
+          
+          if (Array.isArray(dateShifts)) {
+            const dayHours = dateShifts.reduce((sum, shift) => {
+              return sum + (typeof shift === 'object' ? (shift.duration_hours || 0) : 0);
+            }, 0);
+            
+            totalHours += dayHours;
+            
+            // Update daily hours
+            this.$set(employee, header.value + '_hours', dayHours);
+          }
+        });
+        
+        // Update employee total hours
+        this.$set(this.summaryData.employeeHours, employeeName, totalHours);
+        this.$set(employee, '_total', totalHours);
+        this.$set(employee, 'employee', `${employeeName} (Total: ${totalHours}h)`);
+      });
+      
+      // Recalculate daily man hours
+      this.scheduleHeaders.slice(1).forEach(header => {
+        let dailyTotal = 0;
+        
+        this.scheduleItems.forEach(employee => {
+          dailyTotal += employee[header.value + '_hours'] || 0;
+        });
+        
+        this.$set(this.summaryData.dailyManHours, header.value, dailyTotal);
+      });
+      
+      // Recalculate total man hours
+      this.summaryData.totalManHours = Object.values(this.summaryData.dailyManHours).reduce((sum, hours) => sum + hours, 0);
+    }
+  },
+  template: `
+    <v-card>
+      <v-card-title class="primary white--text">
+        <v-icon left dark>mdi-calendar-range</v-icon>
+        Roster Management
+      </v-card-title>
+      
+      <!-- Shift Editor Dialog -->
+      <v-dialog v-model="shiftEditorDialog" max-width="600px">
+        <v-card>
+          <v-card-title class="headline">
+            {{ currentShiftIndex === -1 ? 'Add New Shift' : 'Edit Shift' }}
+          </v-card-title>
+          <v-card-text>
+            <v-container>
+              <v-row>
+                <v-col cols="12">
+                  <div class="subtitle-1">
+                    Employee: <strong>{{ currentEmployee }}</strong>
+                  </div>
+                  <div class="subtitle-1">
+                    Date: <strong>{{ formatDate(currentDate) }}</strong>
+                  </div>
+                </v-col>
+                
+                <v-col cols="12" sm="6">
+                  <v-select
+                    v-model="editedShift.shift"
+                    :items="availableShifts"
+                    label="Shift"
+                    @change="updateTaskTimes"
+                    required
+                  ></v-select>
+                </v-col>
+                
+                <v-col cols="12" sm="6">
+                  <v-select
+                    v-model="editedShift.task"
+                    :items="getTasksForShift(editedShift.shift).map(t => t.name)"
+                    label="Task"
+                    @change="updateTaskTimes"
+                    :disabled="!editedShift.shift"
+                    required
+                  ></v-select>
+                </v-col>
+                
+                <v-col cols="12" sm="6">
+                  <v-text-field
+                    v-model="editedShift.start"
+                    label="Start Time"
+                    type="time"
+                    required
+                  ></v-text-field>
+                </v-col>
+                
+                <v-col cols="12" sm="6">
+                  <v-text-field
+                    v-model="editedShift.end"
+                    label="End Time"
+                    type="time"
+                    required
+                  ></v-text-field>
+                </v-col>
+                
+                <v-col cols="12" sm="6">
+                  <v-text-field
+                    v-model.number="editedShift.duration_hours"
+                    label="Duration (hours)"
+                    type="number"
+                    min="0"
+                    step="0.5"
+                    required
+                  ></v-text-field>
+                </v-col>
+              </v-row>
+            </v-container>
+          </v-card-text>
+          <v-card-actions>
+            <v-spacer></v-spacer>
+            <v-btn color="error" text @click="deleteShift" v-if="currentShiftIndex !== -1">
+              Delete
+            </v-btn>
+            <v-btn color="blue darken-1" text @click="shiftEditorDialog = false">
+              Cancel
+            </v-btn>
+            <v-btn color="blue darken-1" text @click="currentShiftIndex === -1 ? saveNewShift() : saveShiftChanges()">
+              Save
+            </v-btn>
+          </v-card-actions>
+        </v-card>
+      </v-dialog>
+      
+      <v-card-text>
+        <v-alert v-if="errorMessage" type="error" dismissible>
+          {{ errorMessage }}
+        </v-alert>
+
+        <v-row class="mb-4">
+          <v-col cols="12" md="4">
+            <v-menu v-model="menu1" :close-on-content-click="false">
+              <template v-slot:activator="{ on }">
+                <v-text-field
+                  v-model="startDate"
+                  label="Start Date"
+                  prepend-icon="mdi-calendar"
+                  readonly
+                  v-on="on"
+                ></v-text-field>
+              </template>
+              <v-date-picker v-model="startDate" @input="menu1 = false"></v-date-picker>
+            </v-menu>
+          </v-col>
+
+          <v-col cols="12" md="4">
+            <v-text-field
+              v-model.number="duration"
+              label="Schedule Duration (days)"
+              type="number"
+              min="1"
+              max="31"
+            ></v-text-field>
+          </v-col>
+
+          <v-col cols="12" md="4">
+            <v-btn 
+              color="primary" 
+              @click="generateSchedule"
+              :loading="isLoading"
+              :disabled="isLoading"
+              block
+            >
+              <v-icon left>mdi-autorenew</v-icon>
+              {{ isLoading ? 'Generating...' : 'Generate Schedule' }}
+            </v-btn>
+          </v-col>
+        </v-row>
+
+        <v-expand-transition>
+          <div v-if="showSchedule" class="schedule-results">
+            <v-card class="elevation-3">
+              <v-card-title class="secondary white--text">
+                Generated Schedule
+                <v-spacer></v-spacer>
+                <v-btn icon @click="showSchedule = false">
+                  <v-icon color="white">mdi-close</v-icon>
+                </v-btn>
+              </v-card-title>
+              
+              <v-card-text class="pa-0">
+                <v-data-table
+                  :headers="scheduleHeaders"
+                  :items="scheduleItems"
+                  :items-per-page="10"
+                  class="elevation-1 schedule-table"
+                  disable-pagination
+                  hide-default-footer
+                >
+                  <template v-slot:header.employee>
+                    <div class="d-flex align-center">
+                      Employee
+                      <v-tooltip bottom>
+                        <template v-slot:activator="{ on, attrs }">
+                          <v-icon small class="ml-1" v-bind="attrs" v-on="on">mdi-information</v-icon>
+                        </template>
+                        <span>Click on a shift to edit it</span>
+                      </v-tooltip>
+                    </div>
+                  </template>
+                  <template v-slot:body.append>
+                    <tr class="total-row">
+                      <td><strong>Daily Hours</strong></td>
+                      <td v-for="date in scheduleHeaders.slice(1)" :key="date.value">
+                        {{ summaryData.dailyManHours[date.value] || 0 }}
+                      </td>
+                    </tr>
+                  </template>
+                  <template v-slot:item="{ item }">
+                    <tr>
+                      <td>{{ item.employee }}</td>
+                      <td v-for="date in scheduleHeaders.slice(1)" :key="date.value">
+                        <div v-if="item[date.value] && item[date.value].length > 0">
+                          <div v-for="(entry, idx) in item[date.value]" :key="idx">
+                            <div v-if="typeof entry === 'string'" class="day-marker">
+                              <span v-if="entry.startsWith('PREFERRED:')" class="preferred-marker">
+                                ★ {{ entry }}
+                              </span>
+                              <span v-else-if="entry === 'MISSED PREFERENCE'" class="missed-preference">
+                                ⚠️ {{ entry }}
+                              </span>
+                              <span v-else class="day-type">
+                                <span v-if="entry === 'VACATION'" class="vacation-marker">🏖️ VACATION</span>
+                                <span v-else-if="entry === 'TIME OFF'" class="time-off-marker">⏸️ TIME OFF</span>
+                                <span v-else-if="entry === 'OFF (Requested)'" class="day-off-marker">🚫 OFF (Requested)</span>
+                                <span v-else>{{ entry }}</span>
+                              </span>
+                            </div>
+                            <div v-else class="shift-entry" @click="openShiftEditor(item, date.value, entry, idx)" style="cursor: pointer;">
+                              <strong>{{ entry.task }}</strong> ({{ entry.shift }})<br>
+                              {{ entry.start }} - {{ entry.end }} ({{ entry.duration_hours }}h)
+                              <v-icon x-small color="primary" class="ml-1">mdi-pencil</v-icon>
+                            </div>
+                          </div>
+                        </div>
+                        <div v-else class="empty-cell" @click="addNewShift(item, date.value)" style="cursor: pointer; min-height: 30px; display: flex; align-items: center; justify-content: center;">
+                          <v-icon x-small color="grey" v-if="!item[date.value] || item[date.value] === 'OFF'">mdi-plus</v-icon>
+                        </div>
+                      </td>
+                    </tr>
+                  </template>
+                </v-data-table>
+                
+                <v-card class="mt-4" flat>
+                  <v-card-text class="text-h6">
+                    Total Man Hours: {{ summaryData.totalManHours }}
+                  </v-card-text>
+                </v-card>
+              </v-card-text>
+            </v-card>
+
+            <v-card v-if="violations.length > 0" class="violation-report mt-4">
+              <v-card-title class="error--text">
+                <v-icon left color="error">mdi-alert</v-icon>
+                Constraint Violations ({{ violations.length }})
+              </v-card-title>
+              <v-card-text>
+                <v-expansion-panels>
+                  <v-expansion-panel v-for="(violation, index) in violations" :key="index">
+                    <v-expansion-panel-header>
+                      <div class="d-flex align-center">
+                        <v-icon :color="getViolationColor(violation.type)" class="mr-2">
+                          {{ getViolationIcon(violation.type) }}
+                        </v-icon>
+                        <span>{{ violation.message }}</span>
+                      </div>
+                    </v-expansion-panel-header>
+                    <v-expansion-panel-content>
+                      <v-list dense>
+                        <!-- Affected Employees -->
+                        <v-list-item v-if="violation.employees && violation.employees.length > 0">
+                          <v-list-item-icon>
+                            <v-icon>mdi-account-group</v-icon>
+                          </v-list-item-icon>
+                          <v-list-item-content>
+                            <v-list-item-title>Affected Employees</v-list-item-title>
+                            <v-list-item-subtitle>
+                              <v-chip
+                                v-for="emp in violation.employees"
+                                :key="emp"
+                                small
+                                class="mr-1"
+                                color="primary"
+                                text-color="white"
+                              >
+                                {{ emp }}
+                              </v-chip>
+                            </v-list-item-subtitle>
+                          </v-list-item-content>
+                        </v-list-item>
+
+                        <!-- Dates -->
+                        <v-list-item v-if="violation.dates && violation.dates.length > 0">
+                          <v-list-item-icon>
+                            <v-icon>mdi-calendar</v-icon>
+                          </v-list-item-icon>
+                          <v-list-item-content>
+                            <v-list-item-title>Affected Dates</v-list-item-title>
+                            <v-list-item-subtitle>
+                              <v-chip
+                                v-for="date in violation.dates"
+                                :key="date"
+                                small
+                                class="mr-1"
+                                color="secondary"
+                                text-color="white"
+                              >
+                                {{ formatDate(date) }}
+                              </v-chip>
+                            </v-list-item-subtitle>
+                          </v-list-item-content>
+                        </v-list-item>
+
+                        <!-- Specific Details based on Violation Type -->
+                        <template v-if="violation.type === 'SUPERVISOR'">
+                          <v-list-item>
+                            <v-list-item-icon>
+                              <v-icon>mdi-shield-account</v-icon>
+                            </v-list-item-icon>
+                            <v-list-item-content>
+                              <v-list-item-title>Available Supervisors</v-list-item-title>
+                              <v-list-item-subtitle>
+                                <v-chip
+                                  v-for="supervisor in violation.details.available_supervisors"
+                                  :key="supervisor.name"
+                                  small
+                                  class="mr-1"
+                                  color="info"
+                                  text-color="white"
+                                >
+                                  {{ supervisor.name }}
+                                  <v-tooltip bottom>
+                                    <template v-slot:activator="{ on, attrs }">
+                                      <v-icon small v-bind="attrs" v-on="on" class="ml-1">mdi-information</v-icon>
+                                    </template>
+                                    <span>Skills: {{ supervisor.skills.join(', ') }}</span>
+                                  </v-tooltip>
+                                </v-chip>
+                              </v-list-item-subtitle>
+                            </v-list-item-content>
+                          </v-list-item>
+                          <v-list-item>
+                            <v-list-item-icon>
+                              <v-icon>mdi-clipboard-list</v-icon>
+                            </v-list-item-icon>
+                            <v-list-item-content>
+                              <v-list-item-title>Required Skills</v-list-item-title>
+                              <v-list-item-subtitle>
+                                <v-chip
+                                  v-for="(skill, task) in violation.details.shift_requirements"
+                                  :key="task"
+                                  small
+                                  class="mr-1"
+                                  color="warning"
+                                  text-color="white"
+                                >
+                                  {{ task }}: {{ skill }}
+                                </v-chip>
+                              </v-list-item-subtitle>
+                            </v-list-item-content>
+                          </v-list-item>
+                        </template>
+
+                        <template v-if="violation.type === 'CONSECUTIVE_DAYS'">
+                          <v-list-item>
+                            <v-list-item-icon>
+                              <v-icon>mdi-calendar-clock</v-icon>
+                            </v-list-item-icon>
+                            <v-list-item-content>
+                              <v-list-item-title>Consecutive Working Days</v-list-item-title>
+                              <v-list-item-subtitle>
+                                <div v-for="day in violation.details.consecutive_days" :key="day.date" class="mb-1">
+                                  <strong>{{ formatDate(day.date) }}:</strong>
+                                  <v-chip
+                                    v-for="shift in day.shifts"
+                                    :key="shift.shift"
+                                    small
+                                    class="mr-1"
+                                    color="info"
+                                    text-color="white"
+                                  >
+                                    {{ shift.shift }} ({{ shift.start }}-{{ shift.end }})
+                                  </v-chip>
+                                </div>
+                                <div class="mt-2">
+                                  <strong>Total Consecutive Days:</strong> {{ violation.details.total_days }}
+                                </div>
+                              </v-list-item-subtitle>
+                            </v-list-item-content>
+                          </v-list-item>
+                        </template>
+
+                        <template v-if="violation.type === 'CONTRACT_HOURS'">
+                          <v-list-item>
+                            <v-list-item-icon>
+                              <v-icon>mdi-clock-outline</v-icon>
+                            </v-list-item-icon>
+                            <v-list-item-content>
+                              <v-list-item-title>Weekly Hours Breakdown</v-list-item-title>
+                              <v-list-item-subtitle>
+                                <div v-for="day in violation.details.daily_breakdown" :key="day.date" class="mb-1">
+                                  <strong>{{ formatDate(day.date) }}:</strong> {{ day.hours }} hours
+                                  <v-chip
+                                    v-for="shift in day.shifts"
+                                    :key="shift.shift"
+                                    small
+                                    class="mr-1"
+                                    color="info"
+                                    text-color="white"
+                                  >
+                                    {{ shift.shift }} ({{ shift.duration_hours }}h)
+                                  </v-chip>
+                                </div>
+                                <div class="mt-2">
+                                  <strong>Total Hours:</strong> {{ violation.details.actual_hours }}
+                                  <br>
+                                  <strong>Contract Range:</strong> {{ violation.details.min_hours }}-{{ violation.details.max_hours }} hours
+                                </div>
+                              </v-list-item-subtitle>
+                            </v-list-item-content>
+                          </v-list-item>
+                        </template>
+
+                        <template v-if="violation.type === 'PREFERENCE'">
+                          <v-list-item>
+                            <v-list-item-icon>
+                              <v-icon>mdi-star</v-icon>
+                            </v-list-item-icon>
+                            <v-list-item-content>
+                              <v-list-item-title>Shift Assignment Details</v-list-item-title>
+                              <v-list-item-subtitle>
+                                <div class="mb-2">
+                                  <strong>Preferred Shift:</strong> {{ violation.details.preferred_shift }}
+                                </div>
+                                <div v-if="violation.details.assigned_shifts.length > 0">
+                                  <strong>Assigned Shifts:</strong>
+                                  <v-chip
+                                    v-for="shift in violation.details.assigned_shifts"
+                                    :key="shift.shift"
+                                    small
+                                    class="mr-1"
+                                    color="info"
+                                    text-color="white"
+                                  >
+                                    {{ shift.shift }} ({{ shift.start }}-{{ shift.end }})
+                                  </v-chip>
+                                </div>
+                                <div class="mt-2">
+                                  <strong>Employee Position:</strong> {{ violation.details.employee_position }}
+                                  <br>
+                                  <strong>Employee Skills:</strong>
+                                  <v-chip
+                                    v-for="skill in violation.details.employee_skills"
+                                    :key="skill"
+                                    small
+                                    class="mr-1"
+                                    color="success"
+                                    text-color="white"
+                                  >
+                                    {{ skill }}
+                                  </v-chip>
+                                </div>
+                              </v-list-item-subtitle>
+                            </v-list-item-content>
+                          </v-list-item>
+                        </template>
+                      </v-list>
+                    </v-expansion-panel-content>
+                  </v-expansion-panel>
+                </v-expansion-panels>
+              </v-card-text>
+            </v-card>
+          </div>
+        </v-expand-transition>
+      </v-card-text>
+    </v-card>
+  `
+};
+
+
+const RequestManagement = {
+  data() {
+    return {
+      requests: [],
+      dialog: false,
+      headers: [
+        { text: 'Employee', value: 'employee' },
+        { text: 'Type', value: 'type' },
+        { text: 'Dates', value: 'dates' },
+        { text: 'Details', value: 'details' },
+        { text: 'Status', value: 'status' },
+        { text: 'Shift Preference', value: 'shiftPreference' },
+        { text: 'Actions', value: 'actions', sortable: false }
+      ],
+      editedIndex: -1,
+      editedItem: { employee: '', type: '', dates: [], details: '', status: 'Pending', shiftPreference: '', dateType: 'single' },
+      defaultItem: { employee: '', type: '', dates: [], details: '', status: 'Pending', shiftPreference: '', dateType: 'single' },
+      employees: [],
+      requestTypes: ['Time Off', 'Shift Preference', 'Vacation Leave'],
+      shiftPreferences: [],
+      dateTypes: ['Single Date', 'Multiple Dates', 'Date Range'],
+      dateMenu: false,
+      startDateMenu: false,
+      endDateMenu: false,
+      search: ''
+    }
+  },
+  created() {
+    this.fetchRequests();
+    this.fetchEmployees();
+    this.fetchShifts();
+  },
+  methods: {
+    async fetchRequests() {
+      this.requests = await db.requests.toArray();
+    },
+    async fetchEmployees() {
+      this.employees = await db.employees.toArray();
+    },
+    async fetchShifts() {
+      const shifts = await db.shifts.toArray();
+      this.shiftPreferences = shifts.map(shift => shift.name);
+    },
+    editItem(item) {
+      this.editedIndex = this.requests.indexOf(item);
+      this.editedItem = Object.assign({}, item);
+      this.dialog = true;
+    },
+    async deleteItem(item) {
+      const index = this.requests.indexOf(item);
+      if (confirm('Are you sure you want to delete this request?')) {
+        await db.requests.delete(item.id);
+        this.requests.splice(index, 1);
+      }
+    },
+    close() {
+      this.dialog = false;
+      this.$nextTick(() => {
+        this.editedItem = Object.assign({}, this.defaultItem);
+        this.editedIndex = -1;
+      });
+    },
+    async save() {
+      try {
+        let datesToSave = [];
+        if (this.editedItem.dateType === 'Single Date') {
+          datesToSave = [this.editedItem.dates[0]];
+        } else if (this.editedItem.dateType === 'Multiple Dates') {
+          datesToSave = this.editedItem.dates;
+        } else if (this.editedItem.dateType === 'Date Range') {
+          const start = new Date(this.editedItem.dates[0]);
+          const end = new Date(this.editedItem.dates[1]);
+          for (let d = start; d <= end; d.setDate(d.getDate() + 1)) {
+            datesToSave.push(new Date(d).toISOString().split('T')[0]);
+          }
+        }
+
+        const requestToSave = { ...this.editedItem, dates: datesToSave };
+
+        if (this.editedIndex > -1) {
+          await db.requests.update(requestToSave.id, requestToSave);
+          Object.assign(this.requests[this.editedIndex], requestToSave);
+        } else {
+          const id = await db.requests.add(requestToSave);
+          requestToSave.id = id;
+          this.requests.push(requestToSave);
+        }
+        this.close();
+      } catch (error) {
+        console.error('Error saving request:', error);
+        alert('An error occurred while saving. Please try again.');
+      }
+    }
+  },
+  template: `
+    <v-card>
+      <v-card-title>Request Management</v-card-title>
+      <v-data-table :headers="headers" :items="requests" :search="search" class="elevation-1">
+        <template v-slot:top>
+          <v-toolbar flat>
+            <v-toolbar-title>Requests</v-toolbar-title>
+            <v-divider class="mx-4" inset vertical></v-divider>
+            <v-spacer></v-spacer>
+            <v-dialog v-model="dialog" max-width="600px">
+              <template v-slot:activator="{ on, attrs }">
+                <v-btn color="primary" dark class="mb-2" v-bind="attrs" v-on="on">New Request</v-btn>
+              </template>
+              <v-card>
+                <v-card-title><span class="text-h5">{{ editedIndex === -1 ? 'New Request' : 'Edit Request' }}</span></v-card-title>
+                <v-card-text>
+                  <v-container>
+                    <v-row>
+                      <v-col cols="12" sm="6"><v-select v-model="editedItem.employee" :items="employees" item-text="name" item-value="name" label="Employee"></v-select></v-col>
+                      <v-col cols="12" sm="6"><v-select v-model="editedItem.type" :items="requestTypes" label="Request Type"></v-select></v-col>
+                      <v-col cols="12" sm="6" v-if="editedItem.type === 'Shift Preference'"><v-select v-model="editedItem.shiftPreference" :items="shiftPreferences" label="Shift Preference"></v-select></v-col>
+                      <v-col cols="12" sm="6"><v-select v-model="editedItem.dateType" :items="dateTypes" label="Date Selection"></v-select></v-col>
+                      <v-col cols="12" sm="6" v-if="editedItem.dateType === 'Single Date'">
+                        <v-menu v-model="dateMenu" :close-on-content-click="false" :nudge-right="40" transition="scale-transition" offset-y min-width="auto">
+                          <template v-slot:activator="{ on, attrs }">
+                            <v-text-field v-model="editedItem.dates[0]" label="Date" prepend-icon="mdi-calendar" readonly v-bind="attrs" v-on="on"></v-text-field>
+                          </template>
+                          <v-date-picker v-model="editedItem.dates[0]" @input="dateMenu = false"></v-date-picker>
+                        </v-menu>
+                      </v-col>
+                      <v-col cols="12" sm="6" v-if="editedItem.dateType === 'Multiple Dates'">
+                        <v-menu v-model="dateMenu" :close-on-content-click="false" :nudge-right="40" transition="scale-transition" offset-y min-width="auto">
+                          <template v-slot:activator="{ on, attrs }">
+                            <v-text-field v-model="editedItem.dates" label="Dates" prepend-icon="mdi-calendar" readonly v-bind="attrs" v-on="on"></v-text-field>
+                          </template>
+                          <v-date-picker v-model="editedItem.dates" @input="dateMenu = false" multiple></v-date-picker>
+                        </v-menu>
+                      </v-col>
+                      <v-col cols="12" sm="6" v-if="editedItem.dateType === 'Date Range'">
+                        <v-menu v-model="startDateMenu" :close-on-content-click="false" :nudge-right="40" transition="scale-transition" offset-y min-width="auto">
+                          <template v-slot:activator="{ on, attrs }">
+                            <v-text-field v-model="editedItem.dates[0]" label="Start Date" prepend-icon="mdi-calendar" readonly v-bind="attrs" v-on="on"></v-text-field>
+                          </template>
+                          <v-date-picker v-model="editedItem.dates[0]" @input="startDateMenu = false"></v-date-picker>
+                        </v-menu>
+                      </v-col>
+                      <v-col cols="12" sm="6" v-if="editedItem.dateType === 'Date Range'">
+                        <v-menu v-model="endDateMenu" :close-on-content-click="false" :nudge-right="40" transition="scale-transition" offset-y min-width="auto">
+                          <template v-slot:activator="{ on, attrs }">
+                            <v-text-field v-model="editedItem.dates[1]" label="End Date" prepend-icon="mdi-calendar" readonly v-bind="attrs" v-on="on"></v-text-field>
+                          </template>
+                          <v-date-picker v-model="editedItem.dates[1]" @input="endDateMenu = false"></v-date-picker>
+                        </v-menu>
+                      </v-col>
+                      <v-col cols="12"><v-textarea v-model="editedItem.details" label="Details" rows="3"></v-textarea></v-col>
+                      <v-col cols="12" sm="6"><v-select v-model="editedItem.status" :items="['Pending', 'Approved', 'Denied']" label="Status"></v-select></v-col>
+                    </v-row>
+                  </v-container>
+                </v-card-text>
+                <v-card-actions>
+                  <v-spacer></v-spacer>
+                  <v-btn color="blue darken-1" text @click="close">Cancel</v-btn>
+                  <v-btn color="blue darken-1" text @click="save">Save</v-btn>
+                </v-card-actions>
+              </v-card>
+            </v-dialog>
+          </v-toolbar>
+        </template>
+        <template v-slot:item.actions="{ item }">
+          <v-icon small class="mr-2" @click="editItem(item)">mdi-pencil</v-icon>
+          <v-icon small @click="deleteItem(item)">mdi-delete</v-icon>
+        </template>
+      </v-data-table>
+    </v-card>
+  `
+};
+
+const SkillManagement = {
+  data() {
+    return {
+      skills: [],
+      dialog: false,
+      headers: [
+        { text: 'Skill Name', value: 'name' },
+        { text: 'Actions', value: 'actions', sortable: false }
+      ],
+      editedIndex: -1,
+      editedItem: { name: '' },
+      defaultItem: { name: '' },
+      search: ''
+    }
+  },
+  created() {
+    this.fetchSkills();
+  },
+  methods: {
+    async fetchSkills() {
+      this.skills = await db.skills.toArray();
+    },
+    editItem(item) {
+      this.editedIndex = this.skills.indexOf(item);
+      this.editedItem = Object.assign({}, item);
+      this.dialog = true;
+    },
+    async deleteItem(item) {
+      const index = this.skills.indexOf(item);
+      if (confirm('Are you sure you want to delete this skill?')) {
+        await db.skills.delete(item.id);
+        this.skills.splice(index, 1);
+      }
+    },
+    close() {
+      this.dialog = false;
+      this.$nextTick(() => {
+        this.editedItem = Object.assign({}, this.defaultItem);
+        this.editedIndex = -1;
+      });
+    },
+    async save() {
+      try {
+        if (this.editedIndex > -1) {
+          await db.skills.update(this.editedItem.id, this.editedItem);
+          Object.assign(this.skills[this.editedIndex], this.editedItem);
+        } else {
+          const id = await db.skills.add(this.editedItem);
+          this.editedItem.id = id;
+          this.skills.push(this.editedItem);
+        }
+        this.close();
+      } catch (error) {
+        console.error('Error saving skill:', error);
+        alert('An error occurred while saving. Please try again.');
+      }
+    }
+  },
+  template: `
+    <v-card>
+      <v-card-title>Skill Management</v-card-title>
+      <v-data-table :headers="headers" :items="skills" :search="search" class="elevation-1">
+        <template v-slot:top>
+          <v-toolbar flat>
+            <v-toolbar-title>Skills</v-toolbar-title>
+            <v-divider class="mx-4" inset vertical></v-divider>
+            <v-spacer></v-spacer>
+            <v-dialog v-model="dialog" max-width="500px">
+              <template v-slot:activator="{ on, attrs }">
+                <v-btn color="primary" dark class="mb-2" v-bind="attrs" v-on="on">New Skill</v-btn>
+              </template>
+              <v-card>
+                <v-card-title><span class="text-h5">{{ editedIndex === -1 ? 'New Skill' : 'Edit Skill' }}</span></v-card-title>
+                <v-card-text>
+                  <v-container>
+                    <v-row>
+                      <v-col cols="12" sm="6" md="4"><v-text-field v-model="editedItem.name" label="Skill name"></v-text-field></v-col>
+                    </v-row>
+                  </v-container>
+                </v-card-text>
+                <v-card-actions>
+                  <v-spacer></v-spacer>
+                  <v-btn color="blue darken-1" text @click="close">Cancel</v-btn>
+                  <v-btn color="blue darken-1" text @click="save">Save</v-btn>
+                </v-card-actions>
+              </v-card>
+            </v-dialog>
+          </v-toolbar>
+        </template>
+        <template v-slot:item.actions="{ item }">
+          <v-icon small class="mr-2" @click="editItem(item)">mdi-pencil</v-icon>
+          <v-icon small @click="deleteItem(item)">mdi-delete</v-icon>
+        </template>
+      </v-data-table>
+    </v-card>
+  `
+};
+
+new Vue({
+  el: '#app',
+  vuetify: new Vuetify(),
+  components: {
+    'dashboard': Dashboard,
+    'skills': SkillManagement,
+    'contract-type': ContractTypeManagement,
+    'settings': SettingsManagement,
+    'employees': EmployeeManagement,
+    'shifts': ShiftManagement,
+    'roster': RosterManagement,
+    'requests': RequestManagement,
+    
+  },
+  data: {
+    drawer: false,
+    currentView: 'dashboard'
+  }
+});
+</script>
+</body>
+</html>
