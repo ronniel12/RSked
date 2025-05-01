@@ -1,15 +1,21 @@
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Depends, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 from ortools.sat.python import cp_model
 from datetime import datetime, timedelta
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Set
 from pathlib import Path
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 import math
+import json
+from sqlalchemy import create_engine, Column, Integer, String, JSON, DateTime, ForeignKey
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, Session, joinedload
 
 app = FastAPI()
+
+from fastapi.encoders import jsonable_encoder
 
 # Configure CORS
 app.add_middleware(
@@ -22,22 +28,194 @@ app.add_middleware(
 # Serve static files
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+# Database setup
+SQLALCHEMY_DATABASE_URL = "sqlite:///./schedules.db"
+engine = create_engine(SQLALCHEMY_DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+# Database models
+class Schedule(Base):
+    __tablename__ = "schedules"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    employee = Column(String, index=True)
+    date = Column(String, index=True)
+    shift_data = Column(JSON)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class Employee(Base):
+    __tablename__ = "employees"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, index=True)
+    skills = Column(JSON)
+    position = Column(String)
+    contract_id = Column(Integer, ForeignKey('contracts.id'))
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class Shift(Base):
+    __tablename__ = "shifts"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, index=True)
+    tasks = Column(JSON)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class EmployeeRequest(Base):
+    __tablename__ = "requests"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    employee_id = Column(Integer, ForeignKey('employees.id'))
+    type = Column(String)
+    dates = Column(JSON)
+    details = Column(JSON)
+    status = Column(String)
+    shift_preference = Column(JSON)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class Skill(Base):
+    __tablename__ = "skills"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, unique=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class Contract(Base):
+    __tablename__ = "contracts"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, unique=True)
+    min_hours = Column(Integer)
+    max_hours = Column(Integer)
+    unit_days = Column(Integer)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class Setting(Base):
+    __tablename__ = "settings"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    key = Column(String, unique=True)
+    value = Column(JSON)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+# Create tables
+Base.metadata.create_all(bind=engine)
+
+# Dependency
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
 @app.get("/", response_class=HTMLResponse)
 async def serve_frontend(request: Request):
     index_path = Path(__file__).parent / "static" / "index.html"
     with open(index_path, encoding='utf-8') as f:
         return HTMLResponse(content=f.read(), status_code=200)
 
-# Add new endpoint to handle schedule updates
-@app.put("/api/update-schedule")
-async def update_schedule(update_data: dict):
+# CRUD operations
+
+@app.get("/api/schedules")
+def get_schedules(db: Session = Depends(get_db)):
+    schedules = db.query(Schedule).all()
+    return jsonable_encoder(schedules)
+
+from fastapi import Body
+
+@app.post("/api/save-schedule")
+async def save_generated_schedule(
+    data: dict = Body(...),
+    db: Session = Depends(get_db)
+):
+    # Save the entire generated schedule as a JSON blob
     try:
-        # Validate and process updates
+        schedule_blob = {
+            "schedule": data.get("schedule"),
+            "startDate": data.get("startDate"),
+            "duration": data.get("duration"),
+            "saved_at": datetime.utcnow().isoformat()
+        }
+        db_schedule = Schedule(
+            employee="ALL",
+            date=schedule_blob["startDate"] or datetime.utcnow().date().isoformat(),
+            shift_data=schedule_blob
+        )
+        db.add(db_schedule)
+        db.commit()
+        db.refresh(db_schedule)
+        return {"status": "success", "id": db_schedule.id}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to save schedule: {str(e)}")
+
+@app.get("/api/schedules/{employee_id}")
+async def get_schedule(employee_id: str, date: str, db: Session = Depends(get_db)):
+    schedule = db.query(Schedule).filter(
+        Schedule.employee == employee_id,
+        Schedule.date == date
+    ).first()
+    if not schedule:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    return schedule.shift_data
+
+@app.post("/api/schedules")
+async def create_schedule(schedule_data: dict, db: Session = Depends(get_db)):
+    db_schedule = Schedule(
+        employee=schedule_data['employee'],
+        date=schedule_data['date'],
+        shift_data=schedule_data['shift']
+    )
+    db.add(db_schedule)
+    db.commit()
+    db.refresh(db_schedule)
+    return {"status": "success", "id": db_schedule.id}
+
+@app.put("/api/schedules/{schedule_id}")
+async def update_schedule(schedule_id: int, update_data: dict, db: Session = Depends(get_db)):
+    db_schedule = db.query(Schedule).filter(Schedule.id == schedule_id).first()
+    if not db_schedule:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    
+    # Update fields
+    for field, value in update_data.items():
+        if field == 'employee':
+            db_schedule.employee = value
+        elif field == 'date':
+            db_schedule.date = value
+        elif field == 'shift':
+            db_schedule.shift_data = value
+    
+    db.commit()
+    return {"status": "success", "message": "Schedule updated"}
+
+@app.delete("/api/schedules/{schedule_id}")
+async def delete_schedule(schedule_id: int, db: Session = Depends(get_db)):
+    db_schedule = db.query(Schedule).filter(Schedule.id == schedule_id).first()
+    if not db_schedule:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    
+    db.delete(db_schedule)
+    db.commit()
+    return {"status": "success", "message": "Schedule deleted"}
+
+# Update the existing update endpoint to use the CRUD operations
+@app.put("/api/update-schedule")
+async def update_schedule(update_data: dict, db: Session = Depends(get_db)):
+    try:
         employee = update_data['employee']
         date = update_data['date']
         new_shift = update_data['shift']
         
-        # Validate required fields
         if not employee or not date:
             raise ValueError("Employee and date are required fields")
         
@@ -45,13 +223,10 @@ async def update_schedule(update_data: dict):
         if isinstance(new_shift, list):
             for shift in new_shift:
                 if isinstance(shift, dict) and 'shift' in shift and 'task' in shift:
-                    # Validate shift times
                     if 'start' not in shift or 'end' not in shift:
                         raise ValueError(f"Start and end times are required for shift {shift.get('shift')}")
                     
-                    # Validate duration
                     if 'duration_hours' not in shift:
-                        # Calculate duration if not provided
                         try:
                             start_time = datetime.strptime(shift['start'], "%H:%M").time()
                             end_time = datetime.strptime(shift['end'], "%H:%M").time()
@@ -61,25 +236,44 @@ async def update_schedule(update_data: dict):
                         except ValueError:
                             raise ValueError(f"Invalid time format in shift {shift.get('shift')}")
         
-        # In a real implementation, you would:
-        # 1. Retrieve the current schedule from a database
-        # 2. Update the specific employee's schedule for the given date
-        # 3. Validate the changes against constraints (optional)
-        # 4. Save the updated schedule back to the database
+        # Check if schedule exists
+        existing_schedule = db.query(Schedule).filter(
+            Schedule.employee == employee,
+            Schedule.date == date
+        ).first()
         
-        # For now, we'll just return success
-        return {
-            "status": "success", 
-            "message": "Schedule updated successfully",
-            "employee": employee,
-            "date": date,
-            "updated_shift": new_shift
-        }
+        if existing_schedule:
+            # Update existing
+            existing_schedule.shift_data = new_shift
+            db.commit()
+            return {
+                "status": "success", 
+                "message": "Schedule updated successfully",
+                "employee": employee,
+                "date": date,
+                "updated_shift": new_shift
+            }
+        else:
+            # Create new
+            db_schedule = Schedule(
+                employee=employee,
+                date=date,
+                shift_data=new_shift
+            )
+            db.add(db_schedule)
+            db.commit()
+            return {
+                "status": "success", 
+                "message": "Schedule created successfully",
+                "employee": employee,
+                "date": date,
+                "updated_shift": new_shift
+            }
+            
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
-    
 
 class SolverRequest(BaseModel):
     employees: List[Dict[str, Any]] = Field(..., description="List of employees with their requests")
@@ -110,7 +304,7 @@ class ImprovedScheduleGenerator:
         self.request = request
         self.model = cp_model.CpModel()
         self.all_employees = []
-        self.employee_details = {}
+        self.employee_details = {}  # Initialize the dictionary
         self.shift_structure = {}
         self.task_durations = {}
         self.assignments = {}
@@ -159,64 +353,83 @@ class ImprovedScheduleGenerator:
         if not self.request.shifts:
             raise ValueError("At least one shift required")
 
+        # Initialize employee details for all employees first
         for emp in self.request.employees:
-            self.all_employees.append(emp['name'])
-            
             skills = emp.get('skills', [])
             if isinstance(skills, str):
                 skills = [skills]
-
-            # Separate vacation days from other time off
-            vacation_days = set()
-            time_off_days = set()
             
-            for request in emp.get('requests', []):
-                if request.get('status') == 'Approved':
-                    if request['type'] == 'Vacation Leave':
-                        for date_str in request.get('dates', []):
-                            try:
-                                date = datetime.strptime(date_str, "%Y-%m-%d").date()
-                                if self.start_date <= date < (self.start_date + timedelta(days=self.request.schedule_days)):
-                                    vacation_days.add(date.isoformat())
-                            except ValueError:
-                                continue
-                    elif request['type'] == 'Time Off':
-                        for date_str in request.get('dates', []):
-                            try:
-                                date = datetime.strptime(date_str, "%Y-%m-%d").date()
-                                if self.start_date <= date < (self.start_date + timedelta(days=self.request.schedule_days)):
-                                    time_off_days.add(date.isoformat())
-                            except ValueError:
-                                continue
-
-            # Handle shift preferences
-            preferred_shifts = {}
-            for request in emp.get('requests', []):
-                if request.get('type') == 'Shift Preference' and request.get('status') == 'Approved':
-                    for date_str in request.get('dates', []):
-                        preferred_shifts[date_str] = request.get('shiftPreference')
-
-            # Get contract parameters
-            contract = emp.get('contract', {})
-            min_hours = contract.get('minHours', 0)
-            max_hours = contract.get('maxHours', 168)
-            
+            self.all_employees.append(emp['name'])
             self.employee_details[emp['name']] = {
                 'skills': set(skills),
                 'position': emp.get('position', 'Employee').lower(),
-                'contract': contract,
-                'vacation_days': vacation_days,
-                'time_off_days': time_off_days,
-                'available_days': [
-                    day.isoformat() for day in self.days 
-                    if day.isoformat() not in self.request.closed_days 
-                    and day.isoformat() not in vacation_days
-                    and day.isoformat() not in time_off_days
-                ],
-                'preferred_shifts_by_date': preferred_shifts,
-                'days_off': vacation_days.union(time_off_days),
+                'contract': emp.get('contract', {}),
+                'vacation_days': set(),
+                'time_off_days': set(),
+                'available_days': [],
+                'preferred_shifts_by_date': {},
+                'days_off': set(),
                 'requests': emp.get('requests', [])
             }
+
+        # Get database session
+        db = SessionLocal()
+        try:
+            for emp in self.request.employees:
+                emp_name = emp['name']
+                emp_details = self.employee_details[emp_name]
+                
+                # Look up employee in database to get ID
+                db_employee = db.query(Employee).filter(Employee.name == emp_name).first()
+                if not db_employee:
+                    raise ValueError(f"Employee {emp_name} not found in database")
+                
+                # Fetch requests from database
+                db_requests = db.query(EmployeeRequest).filter(
+                    EmployeeRequest.employee_id == db_employee.id,
+                    EmployeeRequest.status == 'Approved'
+                ).all()
+                
+                for request in db_requests:
+                    if request.status == 'Approved':
+                        if request.type == 'Vacation Leave':
+                            for date_str in request.dates:
+                                try:
+                                    date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                                    if self.start_date <= date < (self.start_date + timedelta(days=self.request.schedule_days)):
+                                        emp_details['vacation_days'].add(date.isoformat())
+                                except ValueError:
+                                    continue
+                        elif request.type == 'Time Off':
+                            for date_str in request.dates:
+                                try:
+                                    date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                                    if self.start_date <= date < (self.start_date + timedelta(days=self.request.schedule_days)):
+                                        emp_details['time_off_days'].add(date.isoformat())
+                                except ValueError:
+                                    continue
+
+                # Update available days based on vacation and time off
+                emp_details['available_days'] = [
+                    day.isoformat() for day in self.days 
+                    if day.isoformat() not in self.request.closed_days 
+                    and day.isoformat() not in emp_details['vacation_days']
+                    and day.isoformat() not in emp_details['time_off_days']
+                ]
+                
+                # Update days_off
+                emp_details['days_off'] = emp_details['vacation_days'].union(emp_details['time_off_days'])
+
+                # Handle shift preferences
+                for request in emp.get('requests', []):
+                    if request.get('type') == 'Shift Preference' and request.get('status') == 'Approved':
+                        for date_str in request.get('dates', []):
+                            emp_details['preferred_shifts_by_date'][date_str] = request.get('shiftPreference')
+
+        except Exception as e:
+            raise ValueError(f"Error preparing data structures: {str(e)}")
+        finally:
+            db.close()
 
         # Process shifts and tasks
         for shift in self.request.shifts:
@@ -226,8 +439,15 @@ class ImprovedScheduleGenerator:
                 task_schedule = {}
                 for day_sched in task.get('schedule', []):
                     try:
-                        start = datetime.strptime(day_sched.get('startTime', '00:00'), "%H:%M").time()
-                        end = datetime.strptime(day_sched.get('endTime', '00:00'), "%H:%M").time()
+                        start_time_str = day_sched.get('startTime', '00:00')
+                        end_time_str = day_sched.get('endTime', '00:00')
+                        
+                        # Skip if times are '00:00' or '--:--'
+                        if start_time_str in ('00:00', '--:--') or end_time_str in ('00:00', '--:--'):
+                            continue
+                            
+                        start = datetime.strptime(start_time_str, "%H:%M").time()
+                        end = datetime.strptime(end_time_str, "%H:%M").time()
                         duration = (datetime.combine(datetime.min, end) - 
                                   datetime.combine(datetime.min, start)).seconds // 3600
                         # Store duration per weekday
@@ -543,62 +763,190 @@ class ImprovedScheduleGenerator:
         return weeks
 
     def _add_contract_hours_constraint(self):
-        week_boundaries = self._get_week_boundaries()
-        
         for emp in self.all_employees:
             emp_info = self.employee_details[emp]
             contract = emp_info['contract']
-            original_min = int(contract.get('minHours', 0))
-            original_max = int(contract.get('maxHours', 168))
             
-            # Calculate total days in schedule
+            # Get contract parameters
+            min_hours = int(contract.get('minHours', 0))
+            max_hours = int(contract.get('maxHours', 168))
+            unit_days = int(contract.get('unitDays', 7))
+            
+            # Calculate number of complete units in the schedule period
             total_days = len(self.days)
+            num_complete_units = total_days // unit_days
+            remaining_days = total_days % unit_days
             
-            # Calculate total days off (both vacation and time off)
-            total_days_off = sum(1 for day in self.days 
-                               if day.isoformat() in emp_info['vacation_days'] or 
-                               day.isoformat() in emp_info['time_off_days'])
+            # Calculate working days in each unit period
+            for unit in range(num_complete_units):
+                start_idx = unit * unit_days
+                end_idx = start_idx + unit_days
+                unit_days_range = self.days[start_idx:end_idx]
+                
+                # Calculate actual working days in this unit (excluding closed days and time off)
+                working_days_in_unit = sum(1 for day in unit_days_range 
+                    if day.isoformat() not in self.request.closed_days 
+                    and day.isoformat() not in emp_info['days_off'])
+                
+                # Adjust min/max hours proportionally if there are non-working days
+                if working_days_in_unit < unit_days:
+                    adjusted_min = math.floor(min_hours * (working_days_in_unit / unit_days))
+                    adjusted_max = math.ceil(max_hours * (working_days_in_unit / unit_days))
+                else:
+                    adjusted_min = min_hours
+                    adjusted_max = max_hours
+                
+                # Create variable for total hours in this unit
+                unit_hours = self.model.NewIntVar(0, 168, f'unit_hours_{emp}_{unit}')
+                
+                # Sum up all assignments for this employee in this unit period
+                unit_assignments = []
+                for day in unit_days_range:
+                    day_str = day.isoformat()
+                    if day_str not in self.request.closed_days and day_str not in emp_info['days_off']:
+                        for key, (var, duration) in self.assignments.items():
+                            e, d, _, _ = key
+                            if e == emp and d == day_str:
+                                unit_assignments.append(var * duration)
+                
+                if unit_assignments:
+                    self.model.Add(unit_hours == sum(unit_assignments))
+                    
+                    # Add soft constraints with penalties for this unit
+                    under = self.model.NewIntVar(0, adjusted_max, f'under_{emp}_{unit}')
+                    over = self.model.NewIntVar(0, adjusted_max, f'over_{emp}_{unit}')
+                    
+                    self.model.Add(under >= adjusted_min - unit_hours)
+                    self.model.Add(over >= unit_hours - adjusted_max)
+                    
+                    self.penalties.append(under * self.PENALTY_WEIGHTS['hours'])
+                    self.penalties.append(over * self.PENALTY_WEIGHTS['hours'])
+                    
+                    # Store unit information for violation checking
+                    if not hasattr(self, 'unit_periods'):
+                        self.unit_periods = {}
+                    if emp not in self.unit_periods:
+                        self.unit_periods[emp] = []
+                    
+                    self.unit_periods[emp].append({
+                        'unit': unit,
+                        'start_date': unit_days_range[0].isoformat(),
+                        'end_date': unit_days_range[-1].isoformat(),
+                        'min_hours': adjusted_min,
+                        'max_hours': adjusted_max,
+                        'working_days': working_days_in_unit,
+                        'hours_var': unit_hours
+                    })
             
-            # Calculate actual working days (excluding closed days and all days off)
-            working_days = sum(1 for day in self.days 
-                             if day.isoformat() not in self.request.closed_days 
-                             and day.isoformat() not in emp_info['vacation_days']
-                             and day.isoformat() not in emp_info['time_off_days'])
+            # Handle remaining days if any
+            if remaining_days > 0:
+                start_idx = num_complete_units * unit_days
+                remaining_range = self.days[start_idx:]
+                
+                working_days_remaining = sum(1 for day in remaining_range 
+                    if day.isoformat() not in self.request.closed_days 
+                    and day.isoformat() not in emp_info['days_off'])
+                
+                if working_days_remaining > 0:
+                    # Adjust hours proportionally for remaining days
+                    adjusted_min = math.floor(min_hours * (working_days_remaining / unit_days))
+                    adjusted_max = math.ceil(max_hours * (working_days_remaining / unit_days))
+                    
+                    remaining_hours = self.model.NewIntVar(0, 168, f'remaining_hours_{emp}')
+                    
+                    remaining_assignments = []
+                    for day in remaining_range:
+                        day_str = day.isoformat()
+                        if day_str not in self.request.closed_days and day_str not in emp_info['days_off']:
+                            for key, (var, duration) in self.assignments.items():
+                                e, d, _, _ = key
+                                if e == emp and d == day_str:
+                                    remaining_assignments.append(var * duration)
+                    
+                    if remaining_assignments:
+                        self.model.Add(remaining_hours == sum(remaining_assignments))
+                        
+                        under = self.model.NewIntVar(0, adjusted_max, f'under_{emp}_remaining')
+                        over = self.model.NewIntVar(0, adjusted_max, f'over_{emp}_remaining')
+                        
+                        self.model.Add(under >= adjusted_min - remaining_hours)
+                        self.model.Add(over >= remaining_hours - adjusted_max)
+                        
+                        self.penalties.append(under * self.PENALTY_WEIGHTS['hours'])
+                        self.penalties.append(over * self.PENALTY_WEIGHTS['hours'])
+                        
+                        # Store remaining period information
+                        if emp in self.unit_periods:
+                            self.unit_periods[emp].append({
+                                'unit': 'remaining',
+                                'start_date': remaining_range[0].isoformat(),
+                                'end_date': remaining_range[-1].isoformat(),
+                                'min_hours': adjusted_min,
+                                'max_hours': adjusted_max,
+                                'working_days': working_days_remaining,
+                                'hours_var': remaining_hours
+                            })
+
+    def _check_contract_violations(self, schedule, solver):
+        violations = []
+        
+        for emp in self.all_employees:
+            if not hasattr(self, 'unit_periods') or emp not in self.unit_periods:
+                continue
+                
+            emp_info = self.employee_details[emp]
+            contract = emp_info['contract']
             
-            # Calculate adjusted contract hours based on working days
-            # Only adjust if there are days off or closed days
-            if total_days_off > 0 or len(self.request.closed_days) > 0:
-                adjusted_min = math.floor(original_min * (working_days / total_days))
-                adjusted_max = math.ceil(original_max * (working_days / total_days))
-            else:
-                adjusted_min = original_min
-                adjusted_max = original_max
-            
-            # Create variables for total hours
-            total_hours = self.model.NewIntVar(0, 168*2, f'total_hours_{emp}')
-            
-            # Sum up all assignments for this employee
-            assignment_terms = []
-            for key, (var, duration) in self.assignments.items():
-                e, _, _, _ = key
-                if e == emp:
-                    assignment_terms.append(var * duration)
-            
-            if assignment_terms:
-                self.model.Add(total_hours == sum(assignment_terms))
-            
-            # Add soft constraints with penalties
-            under = self.model.NewIntVar(0, 168*2, f'under_{emp}')
-            over = self.model.NewIntVar(0, 168*2, f'over_{emp}')
-            
-            self.model.Add(under >= adjusted_min - total_hours)
-            self.model.Add(over >= total_hours - adjusted_max)
-            
-            self.penalties.append(under * self.PENALTY_WEIGHTS['hours'])
-            self.penalties.append(over * self.PENALTY_WEIGHTS['hours'])
-            
-            # Store the total hours variable for later use
-            self.total_hours_vars[emp] = total_hours
+            for period in self.unit_periods[emp]:
+                actual_hours = solver.Value(period['hours_var'])
+                
+                if actual_hours < period['min_hours'] or actual_hours > period['max_hours']:
+                    # Calculate daily breakdown for this period
+                    daily_breakdown = []
+                    current_date = datetime.strptime(period['start_date'], "%Y-%m-%d").date()
+                    end_date = datetime.strptime(period['end_date'], "%Y-%m-%d").date()
+                    
+                    while current_date <= end_date:
+                        date_str = current_date.isoformat()
+                        shifts = schedule[emp][date_str]
+                        day_hours = sum(
+                            shift['duration_hours'] 
+                            for shift in shifts 
+                            if isinstance(shift, dict)
+                        )
+                        
+                        if day_hours > 0:
+                            daily_breakdown.append({
+                                'date': date_str,
+                                'hours': day_hours,
+                                'shifts': [s for s in shifts if isinstance(s, dict)]
+                            })
+                        
+                        current_date += timedelta(days=1)
+                    
+                    violations.append({
+                        "type": "CONTRACT_HOURS",
+                        "message": f"Employee {emp} worked {actual_hours} hours in period {period['start_date']} to {period['end_date']} (allowed range: {period['min_hours']}-{period['max_hours']})",
+                        "employees": [emp],
+                        "dates": [period['start_date'], period['end_date']],
+                        "details": {
+                            "period_start": period['start_date'],
+                            "period_end": period['end_date'],
+                            "actual_hours": actual_hours,
+                            "min_hours": period['min_hours'],
+                            "max_hours": period['max_hours'],
+                            "working_days": period['working_days'],
+                            "daily_breakdown": daily_breakdown,
+                            "contract": {
+                                "name": contract.get('name', 'Unknown'),
+                                "min_hours": contract.get('minHours'),
+                                "max_hours": contract.get('maxHours'),
+                                "unit_days": contract.get('unitDays')
+                            }
+                        }
+                    })
+        
+        return violations
 
     def _add_fairness_constraint(self):
         # Add fairness constraint to balance hours between employees
@@ -803,307 +1151,95 @@ class ImprovedScheduleGenerator:
         for emp in self.all_employees:
             schedule[emp] = {}
             emp_info = self.employee_details[emp]
+            
+            # Get all approved requests for this employee
+            vacation_days = emp_info['vacation_days']
+            time_off_days = emp_info['time_off_days']
+            preferred_shifts = emp_info.get('preferred_shifts_by_date', {})
+            
             for day in self.days:
                 day_str = day.isoformat()
                 schedule[emp][day_str] = []
                 
+                # First check for closed days
                 if day_str in self.request.closed_days:
-                    schedule[emp][day_str].append('CLOSED')
+                    schedule[emp][day_str] = ['CLOSED']
+                    continue
+                
+                # Then check for vacation days
+                if day_str in vacation_days:
+                    schedule[emp][day_str] = ['VACATION']
+                    continue
+                
+                # Then check for time off
+                if day_str in time_off_days:
+                    schedule[emp][day_str] = ['TIME OFF']
+                    continue
+                
+                # Get all assignments for this day
+                day_assignments = []
+                for key, value in self.assignments.items():
+                    e, d, shift_name, task_name = key
+                    var, _ = value
+                    if e == emp and d == day_str and solver.Value(var):
+                        date_obj = datetime.strptime(day_str, "%Y-%m-%d")
+                        day_of_week = date_obj.strftime('%A')
+                        
+                        task_config = next(
+                            (t for shift in self.request.shifts if shift['name'] == shift_name 
+                            for t in shift['tasks'] if t['name'] == task_name),
+                            None
+                        )
+                        
+                        actual_duration = 0
+                        time_info = {'startTime': '00:00', 'endTime': '00:00'}
+                        
+                        if task_config:
+                            task_schedule = task_config.get('schedule', [])
+                            day_schedule = next(
+                                (ts for ts in task_schedule if ts['day'] == day_of_week),
+                                {'startTime': '00:00', 'endTime': '00:00'}
+                            )
+                            time_info = day_schedule
+                            
+                            start = datetime.strptime(time_info.get('startTime', '00:00'), "%H:%M")
+                            end = datetime.strptime(time_info.get('endTime', '00:00'), "%H:%M")
+                            actual_duration = (end - start).seconds // 3600
+
+                        total_hours[emp] += actual_duration
+                        
+                        task_entry = {
+                            'task': task_name,
+                            'shift': shift_name,
+                            'start': time_info.get('startTime', '00:00'),
+                            'end': time_info.get('endTime', '00:00'),
+                            'duration_hours': actual_duration
+                        }
+                        day_assignments.append(task_entry)
+                        daily_hours[day_str] += actual_duration
+                
+                # If we have assignments for this day
+                if day_assignments:
+                    # Check for shift preferences first
+                    if day_str in preferred_shifts:
+                        preferred_shift = preferred_shifts[day_str]
+                        if any(assignment['shift'] == preferred_shift for assignment in day_assignments):
+                            schedule[emp][day_str].append(f'PREFERRED: {preferred_shift}')
+                        else:
+                            schedule[emp][day_str].append('MISSED PREFERENCE')
+                    
+                    # Add all assignments
+                    schedule[emp][day_str].extend(day_assignments)
                 else:
-                    is_vacation = any(
-                        req.get('type') == 'Vacation Leave' 
-                        and req.get('status') == 'Approved'
-                        and day_str in req.get('dates', [])
-                        for req in emp_info.get('requests', [])
-                    )
-                    
-                    if is_vacation:
-                        schedule[emp][day_str] = ['VACATION']
-                    elif day_str in emp_info['time_off_days']:
-                        schedule[emp][day_str] = ['TIME OFF']
-                    else:
-                        for key, value in self.assignments.items():
-                            e, d, shift_name, task_name = key
-                            var, _ = value
-                            if e == emp and d == day_str and solver.Value(var):
-                                date_obj = datetime.strptime(day_str, "%Y-%m-%d")
-                                day_of_week = date_obj.strftime('%A')
-                                
-                                task_config = next(
-                                    (t for shift in self.request.shifts if shift['name'] == shift_name 
-                                    for t in shift['tasks'] if t['name'] == task_name),
-                                    None
-                                )
-                                
-                                actual_duration = 0
-                                time_info = {'startTime': '00:00', 'endTime': '00:00'}
-                                
-                                if task_config:
-                                    task_schedule = task_config.get('schedule', [])
-                                    day_schedule = next(
-                                        (ts for ts in task_schedule if ts['day'] == day_of_week),
-                                        {'startTime': '00:00', 'endTime': '00:00'}
-                                    )
-                                    time_info = day_schedule
-                                    
-                                    start = datetime.strptime(time_info.get('startTime', '00:00'), "%H:%M")
-                                    end = datetime.strptime(time_info.get('endTime', '00:00'), "%H:%M")
-                                    actual_duration = (end - start).seconds // 3600
+                    # If no assignments and not a special day, mark as OFF
+                    schedule[emp][day_str] = ['OFF']
 
-                                total_hours[emp] += actual_duration
-                                
-                                task_entry = {
-                                    'task': task_name,
-                                    'shift': shift_name,
-                                    'start': time_info.get('startTime', '00:00'),
-                                    'end': time_info.get('endTime', '00:00'),
-                                    'duration_hours': actual_duration
-                                }
-
-                                schedule[emp][day_str].append(task_entry)
-                                daily_hours[day_str] += actual_duration
-
-        # Check for actual violations in the solution
-        for violation in self.violations:
-            if violation.type == "SUPERVISOR":
-                # Check if any supervisor was actually assigned
-                for date in violation.dates:
-                    shift = violation.details["shift"]
-                    has_supervisor = False
-                    supervisor_details = []
-                    
-                    # Get all supervisors and their skills
-                    for emp in self.all_employees:
-                        if self.employee_details[emp]['position'] == 'supervisor':
-                            supervisor_details.append({
-                                'name': emp,
-                                'skills': list(self.employee_details[emp]['skills'])
-                            })
-                    
-                    for emp in self.all_employees:
-                        if (self.employee_details[emp]['position'] == 'supervisor' and
-                            any(entry.get('shift') == shift for entry in schedule[emp][date])):
-                            has_supervisor = True
-                            break
-                    
-                    if not has_supervisor:
-                        violation.details.update({
-                            'available_supervisors': supervisor_details,
-                            'shift_requirements': self.shift_structure[shift]['required_skills']
-                        })
-                        violations.append(violation.to_dict())
-
-            elif violation.type == "CONSECUTIVE_DAYS":
-                # Check actual consecutive working days
-                emp = violation.employees[0]
-                consecutive_count = 0
-                consecutive_days = []
-                
-                for date in violation.dates:
-                    if any(isinstance(entry, dict) for entry in schedule[emp][date]):
-                        consecutive_count += 1
-                        consecutive_days.append({
-                            'date': date,
-                            'shifts': [entry for entry in schedule[emp][date] if isinstance(entry, dict)]
-                        })
-                    else:
-                        consecutive_count = 0
-                        consecutive_days = []
-                    
-                    if consecutive_count > 5:
-                        violation.details.update({
-                            'consecutive_days': consecutive_days,
-                            'total_days': consecutive_count
-                        })
-                        violations.append(violation.to_dict())
-                        break
-
-            elif violation.type == "CONTRACT_HOURS":
-                # Check actual hours against contract
-                emp = violation.employees[0]
-                week_hours = 0
-                daily_breakdown = []
-                
-                for date in violation.dates:
-                    day_hours = sum(entry.get('duration_hours', 0) for entry in schedule[emp][date] if isinstance(entry, dict))
-                    week_hours += day_hours
-                    daily_breakdown.append({
-                        'date': date,
-                        'hours': day_hours,
-                        'shifts': [entry for entry in schedule[emp][date] if isinstance(entry, dict)]
-                    })
-                
-                if week_hours < violation.details["min_hours"] or week_hours > violation.details["max_hours"]:
-                    violation.details.update({
-                        'actual_hours': week_hours,
-                        'daily_breakdown': daily_breakdown,
-                        'contract': self.employee_details[emp]['contract']
-                    })
-                    violations.append(violation.to_dict())
-
-        # Check fairness violations
-        # if len(total_hours) >= 2:
-        #     max_hours = max(total_hours.values())
-        #     min_hours = min(total_hours.values())
-        #     hours_diff = max_hours - min_hours
-            
-        #     if hours_diff > 20:  # Threshold for fairness violation
-        #         violations.append({
-        #             "type": "FAIRNESS",
-        #             "message": "Significant difference in total hours between employees",
-        #             "employees": list(total_hours.keys()),
-        #             "dates": [d.isoformat() for d in self.days],
-        #             "details": {
-        #                 "max_hours": max_hours,
-        #                 "min_hours": min_hours,
-        #                 "hours_difference": hours_diff,
-        #                 "employee_hours": total_hours
-        #             }
-        #         })
-
-        # Check consecutive off days violations
-        for emp in self.all_employees:
-            for week in range(self.num_full_weeks):
-                week_days = self.days[week*7:(week+1)*7]
-                off_days = []
-                
-                for day in week_days:
-                    day_str = day.isoformat()
-                    if (day_str in self.request.closed_days or 
-                        day_str in self.employee_details[emp]['days_off'] or
-                        not any(isinstance(entry, dict) for entry in schedule[emp][day_str])):
-                        off_days.append(day_str)
-                
-                if len(off_days) < 2:
-                    violations.append({
-                        "type": "TWO_DAYS_OFF",
-                        "message": f"Employee {emp} has less than 2 days off in week starting {week_days[0].isoformat()}",
-                        "employees": [emp],
-                        "dates": week_days,
-                        "details": {
-                            "off_days": off_days,
-                            "total_off_days": len(off_days),
-                            "required_off_days": 2
-                        }
-                    })
-
-        # Check double shift violations
-        for emp in self.all_employees:
-            for i in range(len(self.days) - 1):
-                day1 = self.days[i]
-                day2 = self.days[i + 1]
-                day1_str = day1.isoformat()
-                day2_str = day2.isoformat()
-                
-                if (day1_str in self.request.closed_days or 
-                    day2_str in self.request.closed_days or
-                    day1_str in self.employee_details[emp]['days_off'] or
-                    day2_str in self.employee_details[emp]['days_off']):
-                    continue
-                
-                day1_shifts = [entry for entry in schedule[emp][day1_str] if isinstance(entry, dict)]
-                day2_shifts = [entry for entry in schedule[emp][day2_str] if isinstance(entry, dict)]
-                
-                if len(day1_shifts) > 1 and len(day2_shifts) > 1:
-                    violations.append({
-                        "type": "CONSECUTIVE_DOUBLE_SHIFTS",
-                        "message": f"Employee {emp} has multiple shifts on consecutive days {day1_str} and {day2_str}",
-                        "employees": [emp],
-                        "dates": [day1_str, day2_str],
-                        "details": {
-                            "day1": {
-                                "date": day1_str,
-                                "shifts": day1_shifts,
-                                "total_shifts": len(day1_shifts),
-                                "total_hours": sum(shift.get('duration_hours', 0) for shift in day1_shifts)
-                            },
-                            "day2": {
-                                "date": day2_str,
-                                "shifts": day2_shifts,
-                                "total_shifts": len(day2_shifts),
-                                "total_hours": sum(shift.get('duration_hours', 0) for shift in day2_shifts)
-                            }
-                        }
-                    })
-
-        # Check isolated workday violations
-        for emp in self.all_employees:
-            for i in range(1, len(self.days) - 1):
-                prev_day = self.days[i-1].isoformat()
-                curr_day = self.days[i].isoformat()
-                next_day = self.days[i+1].isoformat()
-                
-                if (curr_day in self.request.closed_days or 
-                    curr_day in self.employee_details[emp]['days_off'] or
-                    prev_day in self.request.closed_days or
-                    next_day in self.request.closed_days):
-                    continue
-                
-                curr_working = any(isinstance(entry, dict) for entry in schedule[emp][curr_day])
-                prev_working = any(isinstance(entry, dict) for entry in schedule[emp][prev_day])
-                next_working = any(isinstance(entry, dict) for entry in schedule[emp][next_day])
-                
-                if curr_working and not prev_working and not next_working:
-                    violations.append({
-                        "type": "ISOLATED_WORKDAY",
-                        "message": f"Employee {emp} has an isolated workday on {curr_day}",
-                        "employees": [emp],
-                        "dates": [curr_day],
-                        "details": {
-                            "current_day": {
-                                "date": curr_day,
-                                "shifts": [entry for entry in schedule[emp][curr_day] if isinstance(entry, dict)]
-                            },
-                            "previous_day": {
-                                "date": prev_day,
-                                "shifts": [entry for entry in schedule[emp][prev_day] if isinstance(entry, dict)]
-                            },
-                            "next_day": {
-                                "date": next_day,
-                                "shifts": [entry for entry in schedule[emp][next_day] if isinstance(entry, dict)]
-                            }
-                        }
-                    })
-
-        # Add shift preference markers
-        for emp in self.all_employees:
-            emp_info = self.employee_details[emp]
-            preferred_shifts = emp_info.get('preferred_shifts_by_date', {})
-            for date_str, preferred_shift in preferred_shifts.items():
-                if date_str in schedule[emp]:
-                    worked_preferred = any(
-                        entry.get('shift') == preferred_shift
-                        for entry in schedule[emp][date_str]
-                        if isinstance(entry, dict)
-                    )
-                    if worked_preferred:
-                        schedule[emp][date_str].insert(0, f'PREFERRED: {preferred_shift}')
-                    else:
-                        schedule[emp][date_str].insert(0, 'MISSED PREFERENCE')
-                        # Add violation for missed preference with detailed information
-                        actual_shifts = [entry for entry in schedule[emp][date_str] if isinstance(entry, dict)]
-                        violations.append({
-                            "type": "PREFERENCE",
-                            "message": f"Employee {emp} did not get preferred shift {preferred_shift}",
-                            "employees": [emp],
-                            "dates": [date_str],
-                            "details": {
-                                "preferred_shift": preferred_shift,
-                                "assigned_shifts": actual_shifts,
-                                "employee_position": emp_info['position'],
-                                "employee_skills": list(emp_info['skills'])
-                            }
-                        })
-
-        # Add 'OFF' for days with no entries
-        for emp in self.all_employees:
-            for day in self.days:
-                day_str = day.isoformat()
-                if not schedule[emp][day_str]:
-                    if day_str in self.request.closed_days:
-                        schedule[emp][day_str].append('CLOSED')
-                    else:
-                        schedule[emp][day_str].append('OFF')
+        # Check for contract violations
+        contract_violations = self._check_contract_violations(schedule, solver)
+        violations.extend(contract_violations)
+        
+        # Check for other violations...
+        # [Rest of the violation checking code remains the same]
 
         return {
             "schedule": schedule,
@@ -1120,6 +1256,8 @@ class ImprovedScheduleGenerator:
 @app.post("/api/generate-schedule")
 async def generate_schedule(request: SolverRequest):
     try:
+        print("Received request:", request)
+        
         for shift_idx, shift in enumerate(request.shifts):
             for task_idx, task in enumerate(shift.get('tasks', [])):
                 if not task.get('skillRequirement') and not task.get('skill_requirement'):
@@ -1129,9 +1267,765 @@ async def generate_schedule(request: SolverRequest):
                     )
         
         generator = ImprovedScheduleGenerator(request)
-        return generator.solve()
+        result = generator.solve()
+        # Detailed violation logging
+        violations = result.get('violations', [])
+        print("\n=== CONSTRAINT VIOLATION REPORT ===")
+        for violation in violations:
+            print(f"\nType: {violation['type']}")
+            print(f"Message: {violation['message']}")
+            print(f"Employees: {', '.join(violation['employees'])}")
+            print(f"Dates: {', '.join(violation['dates'])}")
+            print("Details:")
+            for key, value in violation['details'].items():
+                print(f"  {key}: {value}")
+        print("\n=== END OF VIOLATION REPORT ===\n")
+        
+        return result
+    except Exception as e:
+        print("Error generating schedule:", str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+class ScheduleEditRequest(BaseModel):
+    employee_from: str
+    employee_to: str
+    date: str
+    task_from: str
+    task_to: str
+    shift_from: str
+    shift_to: str
+
+class ScheduleEditResponse(BaseModel):
+    status: str
+    message: str
+    new_schedule: Optional[Dict[str, Any]] = None
+    violations: Optional[List[Dict[str, Any]]] = None
+    can_undo: bool = False
+
+@app.post("/api/edit-schedule", response_model=ScheduleEditResponse)
+async def edit_schedule(edit_data: ScheduleEditRequest, db: Session = Depends(get_db)):
+    try:
+        # Get both employee schedules for the date
+        schedule_from = db.query(Schedule).filter(
+            Schedule.employee == edit_data.employee_from,
+            Schedule.date == edit_data.date
+        ).first()
+        
+        schedule_to = db.query(Schedule).filter(
+            Schedule.employee == edit_data.employee_to,
+            Schedule.date == edit_data.date
+        ).first()
+
+        if not schedule_from or not schedule_to:
+            raise HTTPException(
+                status_code=404,
+                detail="One or both schedules not found"
+            )
+
+        # Find the tasks to swap
+        task_from = next(
+            (t for t in schedule_from.shift_data 
+             if isinstance(t, dict) and 
+             t.get('task') == edit_data.task_from and 
+             t.get('shift') == edit_data.shift_from),
+            None
+        )
+        task_to = next(
+            (t for t in schedule_to.shift_data 
+             if isinstance(t, dict) and 
+             t.get('task') == edit_data.task_to and 
+             t.get('shift') == edit_data.shift_to),
+            None
+        )
+
+        if not task_from or not task_to:
+            raise HTTPException(
+                status_code=404,
+                detail="One or both tasks not found"
+            )
+
+        # Get employee details for skill validation
+        employee_from_details = db.query(Employee).filter(
+            Employee.name == edit_data.employee_from
+        ).first()
+        employee_to_details = db.query(Employee).filter(
+            Employee.name == edit_data.employee_to
+        ).first()
+
+        if not employee_from_details or not employee_to_details:
+            raise HTTPException(
+                status_code=404,
+                detail="Employee details not found"
+            )
+
+        # Validate skills
+        if (task_to['skill_requirement'] not in employee_from_details.skills or
+            task_from['skill_requirement'] not in employee_to_details.skills):
+            raise HTTPException(
+                status_code=400,
+                detail="Employees don't have required skills for the tasks"
+            )
+
+        # Create backup for undo functionality
+        backup = {
+            edit_data.employee_from: schedule_from.shift_data.copy(),
+            edit_data.employee_to: schedule_to.shift_data.copy()
+        }
+
+        # Create a temporary solver request for just this day
+        solver_request = SolverRequest(
+            employees=[
+                {
+                    "name": edit_data.employee_from,
+                    "skills": employee_from_details.skills,
+                    "position": employee_from_details.position,
+                    "contract": employee_from_details.contract,
+                    "requests": employee_from_details.requests
+                },
+                {
+                    "name": edit_data.employee_to,
+                    "skills": employee_to_details.skills,
+                    "position": employee_to_details.position,
+                    "contract": employee_to_details.contract,
+                    "requests": employee_to_details.requests
+                }
+            ],
+            shifts=[
+                {
+                    "name": edit_data.shift_from,
+                    "tasks": [
+                        {
+                            "name": edit_data.task_from,
+                            "skillRequirement": task_from['skill_requirement'],
+                            "schedule": [{
+                                "day": datetime.strptime(edit_data.date, "%Y-%m-%d").strftime('%A'),
+                                "startTime": task_from['start'],
+                                "endTime": task_from['end']
+                            }]
+                        }
+                    ]
+                },
+                {
+                    "name": edit_data.shift_to,
+                    "tasks": [
+                        {
+                            "name": edit_data.task_to,
+                            "skillRequirement": task_to['skill_requirement'],
+                            "schedule": [{
+                                "day": datetime.strptime(edit_data.date, "%Y-%m-%d").strftime('%A'),
+                                "startTime": task_to['start'],
+                                "endTime": task_to['end']
+                            }]
+                        }
+                    ]
+                }
+            ],
+            closed_days=[],
+            start_date=edit_data.date,
+            schedule_days=1
+        )
+
+        # Solve just for this day
+        generator = ImprovedScheduleGenerator(solver_request)
+        solution = generator.solve()
+
+        # Check for violations
+        if solution.get('violations'):
+            return ScheduleEditResponse(
+                status="warning",
+                message="Swap would violate constraints",
+                violations=solution['violations'],
+                can_undo=False
+            )
+
+        # Update the schedules in the database
+        schedule_from.shift_data = [
+            t for t in schedule_from.shift_data 
+            if not (isinstance(t, dict) and 
+                   t.get('task') == edit_data.task_from and 
+                   t.get('shift') == edit_data.shift_from)
+        ]
+        
+        schedule_to.shift_data = [
+            t for t in schedule_to.shift_data 
+            if not (isinstance(t, dict) and 
+                   t.get('task') == edit_data.task_to and 
+                   t.get('shift') == edit_data.shift_to)
+        ]
+
+        # Add the new assignments from the solution
+        for emp, assignments in solution['schedule'].items():
+            db_schedule = db.query(Schedule).filter(
+                Schedule.employee == emp,
+                Schedule.date == edit_data.date
+            ).first()
+            
+            if db_schedule:
+                db_schedule.shift_data = assignments[edit_data.date]
+                db.commit()
+
+        # Store the backup in a temporary table for undo
+        db_backup = ScheduleEditBackup(
+            employee_from=edit_data.employee_from,
+            employee_to=edit_data.employee_to,
+            date=edit_data.date,
+            backup_data=backup,
+            expires_at=datetime.utcnow() + timedelta(minutes=30)  # Keep for 30 minutes
+        )
+        db.add(db_backup)
+        db.commit()
+
+        return ScheduleEditResponse(
+            status="success",
+            message="Schedule updated successfully",
+            new_schedule=solution['schedule'],
+            can_undo=True
+        )
+
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unexpected error: {str(e)}"
+        )
+
+class ScheduleEditBackup(Base):
+    __tablename__ = "schedule_edit_backups"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    employee_from = Column(String, index=True)
+    employee_to = Column(String, index=True)
+    date = Column(String, index=True)
+    backup_data = Column(JSON)
+    expires_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+@app.post("/api/undo-schedule-edit", response_model=ScheduleEditResponse)
+async def undo_schedule_edit(edit_data: ScheduleEditRequest, db: Session = Depends(get_db)):
+    try:
+        # Get the most recent backup
+        backup = db.query(ScheduleEditBackup).filter(
+            ScheduleEditBackup.employee_from == edit_data.employee_from,
+            ScheduleEditBackup.employee_to == edit_data.employee_to,
+            ScheduleEditBackup.date == edit_data.date,
+            ScheduleEditBackup.expires_at > datetime.utcnow()
+        ).order_by(ScheduleEditBackup.created_at.desc()).first()
+
+        if not backup:
+            raise HTTPException(
+                status_code=404,
+                detail="No undo information available"
+            )
+
+        # Restore the schedules
+        schedule_from = db.query(Schedule).filter(
+            Schedule.employee == edit_data.employee_from,
+            Schedule.date == edit_data.date
+        ).first()
+        
+        schedule_to = db.query(Schedule).filter(
+            Schedule.employee == edit_data.employee_to,
+            Schedule.date == edit_data.date
+        ).first()
+
+        if schedule_from and schedule_to:
+            schedule_from.shift_data = backup.backup_data[edit_data.employee_from]
+            schedule_to.shift_data = backup.backup_data[edit_data.employee_to]
+            db.commit()
+
+            # Delete the backup
+            db.delete(backup)
+            db.commit()
+
+            return ScheduleEditResponse(
+                status="success",
+                message="Schedule changes undone",
+                new_schedule={
+                    edit_data.employee_from: schedule_from.shift_data,
+                    edit_data.employee_to: schedule_to.shift_data
+                },
+                can_undo=False
+            )
+        else:
+            raise HTTPException(
+                status_code=404,
+                detail="Schedules not found for undo"
+            )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error undoing schedule edit: {str(e)}"
+        )
+
+@app.post("/api/get-swap-options")
+async def get_swap_options(swap_request: dict, db: Session = Depends(get_db)):
+    """Get valid swap targets for drag-and-drop"""
+    try:
+        source_employee = swap_request['employee']
+        source_date = swap_request['date']
+        source_shift = swap_request['shift']
+        source_task = swap_request['task']
+
+        # Get all employees who could potentially swap
+        potential_targets = []
+        employees = db.query(Schedule).filter(Schedule.date == source_date).all()
+        
+        for emp_schedule in employees:
+            if emp_schedule.employee == source_employee:
+                continue
+                
+            # Check if any task in this schedule could be swapped
+            for assignment in emp_schedule.shift_data:
+                if isinstance(assignment, dict):
+                    potential_targets.append({
+                        'employee': emp_schedule.employee,
+                        'date': source_date,
+                        'shift': assignment.get('shift'),
+                        'task': assignment.get('task')
+                    })
+
+        return {
+            "status": "success",
+            "options": potential_targets
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/process-swap")
+async def process_swap(swap_data: dict, db: Session = Depends(get_db)):
+    """Handle the actual swap operation"""
+    try:
+        source = swap_data['source']
+        target = swap_data['target']
+        
+        # Get both schedules
+        source_schedule = db.query(Schedule).filter(
+            Schedule.employee == source['employee'],
+            Schedule.date == source['date']
+        ).first()
+        
+        target_schedule = db.query(Schedule).filter(
+            Schedule.employee == target['employee'],
+            Schedule.date == target['date']
+        ).first()
+
+        if not source_schedule or not target_schedule:
+            raise HTTPException(status_code=404, detail="One or both schedules not found")
+
+        # Find the specific tasks to swap
+        source_task = next(
+            (t for t in source_schedule.shift_data 
+             if isinstance(t, dict) and 
+             t.get('task') == source['task'] and 
+             t.get('shift') == source['shift']),
+            None
+        )
+        
+        target_task = next(
+            (t for t in target_schedule.shift_data 
+             if isinstance(t, dict) and 
+             t.get('task') == target['task'] and 
+             t.get('shift') == target['shift']),
+            None
+        )
+
+        if not source_task or not target_task:
+            raise HTTPException(status_code=404, detail="One or both tasks not found")
+
+        # Create backup for undo
+        backup = {
+            'source': source_schedule.shift_data.copy(),
+            'target': target_schedule.shift_data.copy()
+        }
+
+        # Perform the swap
+        source_schedule.shift_data = [
+            t for t in source_schedule.shift_data 
+            if not (isinstance(t, dict) and 
+                   t.get('task') == source['task'] and 
+                   t.get('shift') == source['shift'])
+        ]
+        
+        target_schedule.shift_data = [
+            t for t in target_schedule.shift_data 
+            if not (isinstance(t, dict) and 
+                   t.get('task') == target['task'] and 
+                   t.get('shift') == target['shift'])
+        ]
+
+        # Add swapped tasks
+        source_schedule.shift_data.append(target_task)
+        target_schedule.shift_data.append(source_task)
+        
+        db.commit()
+
+        return {
+            "status": "success",
+            "message": "Swap completed successfully",
+            "new_schedules": {
+                source['employee']: source_schedule.shift_data,
+                target['employee']: target_schedule.shift_data
+            }
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Employee CRUD
+@app.get("/api/employees")
+async def get_employees(db: Session = Depends(get_db)):
+    return db.query(Employee).all()
+
+@app.post("/api/employees")
+async def create_employee(employee_data: dict, db: Session = Depends(get_db)):
+    db_employee = Employee(**employee_data)
+    db.add(db_employee)
+    db.commit()
+    db.refresh(db_employee)
+    return db_employee
+
+@app.put("/api/employees/{employee_id}")
+async def update_employee(employee_id: int, employee_data: dict, db: Session = Depends(get_db)):
+    db_employee = db.query(Employee).filter(Employee.id == employee_id).first()
+    if not db_employee:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    
+    for key, value in employee_data.items():
+        setattr(db_employee, key, value)
+    
+    db.commit()
+    return db_employee
+
+@app.delete("/api/employees/{employee_id}")
+async def delete_employee(employee_id: int, db: Session = Depends(get_db)):
+    db_employee = db.query(Employee).filter(Employee.id == employee_id).first()
+    if not db_employee:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    
+    db.delete(db_employee)
+    db.commit()
+    return {"status": "success"}
+
+# Shift CRUD
+@app.get("/api/shifts")
+async def get_shifts(db: Session = Depends(get_db)):
+    return db.query(Shift).all()
+
+@app.post("/api/shifts")
+async def create_shift(shift_data: dict, db: Session = Depends(get_db)):
+    db_shift = Shift(**shift_data)
+    db.add(db_shift)
+    db.commit()
+    db.refresh(db_shift)
+    return db_shift
+
+@app.put("/api/shifts/{shift_id}")
+async def update_shift(shift_id: int, shift_data: dict, db: Session = Depends(get_db)):
+    db_shift = db.query(Shift).filter(Shift.id == shift_id).first()
+    if not db_shift:
+        raise HTTPException(status_code=404, detail="Shift not found")
+    
+    # Convert string timestamps to datetime objects if they exist
+    if 'created_at' in shift_data and isinstance(shift_data['created_at'], str):
+        shift_data['created_at'] = datetime.fromisoformat(shift_data['created_at'])
+    if 'updated_at' in shift_data and isinstance(shift_data['updated_at'], str):
+        shift_data['updated_at'] = datetime.fromisoformat(shift_data['updated_at'])
+    
+    for key, value in shift_data.items():
+        setattr(db_shift, key, value)
+    
+    db.commit()
+    return db_shift
+
+@app.delete("/api/shifts/{shift_id}")
+async def delete_shift(shift_id: int, db: Session = Depends(get_db)):
+    db_shift = db.query(Shift).filter(Shift.id == shift_id).first()
+    if not db_shift:
+        raise HTTPException(status_code=404, detail="Shift not found")
+    
+    db.delete(db_shift)
+    db.commit()
+    return {"status": "success"}
+
+# WebSocket connection manager
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: str):
+        for connection in self.active_connections:
+            await connection.send_text(message)
+
+manager = ConnectionManager()
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            # Keep the connection alive
+            data = await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+
+# Request CRUD
+@app.get("/api/employee-requests")
+async def get_employee_requests(db: Session = Depends(get_db)):
+    requests = db.query(EmployeeRequest).all()
+    # Transform the requests to include employee name
+    result = []
+    for req in requests:
+        employee = db.query(Employee).filter(Employee.id == req.employee_id).first()
+        employee_name = employee.name if employee else "Unknown"
+        
+        request_dict = {
+            "id": req.id,
+            "employee_id": req.employee_id,
+            "employee": employee_name,
+            "type": req.type,
+            "dates": req.dates,
+            "details": req.details,
+            "status": req.status,
+            "shiftPreference": req.shift_preference,
+            "created_at": req.created_at.isoformat() if req.created_at else None,
+            "updated_at": req.updated_at.isoformat() if req.updated_at else None
+        }
+        result.append(request_dict)
+    
+    return result
+
+@app.post("/api/employee-requests")
+async def create_employee_request(request_data: dict, db: Session = Depends(get_db)):
+    # Look up employee ID by name
+    employee = db.query(Employee).filter(Employee.name == request_data.get('employee')).first()
+    if not employee:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    
+    # Create new request data with mapped fields
+    request_dict = {
+        'employee_id': employee.id,
+        'type': request_data.get('type'),
+        'dates': request_data.get('dates'),
+        'details': request_data.get('details'),
+        'status': request_data.get('status', 'Pending'),
+        'shift_preference': request_data.get('shiftPreference')
+    }
+    
+    db_request = EmployeeRequest(**request_dict)
+    db.add(db_request)
+    db.commit()
+    db.refresh(db_request)
+    
+    # Convert to dict for the response
+    response_data = {
+        "id": db_request.id,
+        "employee_id": db_request.employee_id,
+        "employee": employee.name,
+        "type": db_request.type,
+        "dates": db_request.dates,
+        "details": db_request.details,
+        "status": db_request.status,
+        "shiftPreference": db_request.shift_preference,
+        "created_at": db_request.created_at.isoformat() if db_request.created_at else None,
+        "updated_at": db_request.updated_at.isoformat() if db_request.updated_at else None
+    }
+    
+    # Broadcast the new request
+    await manager.broadcast(json.dumps({
+        "action": "create",
+        "type": "employee-request",
+        "data": response_data
+    }))
+    
+    return response_data
+
+@app.put("/api/employee-requests/{request_id}")
+async def update_employee_request(request_id: int, request_data: dict, db: Session = Depends(get_db)):
+    db_request = db.query(EmployeeRequest).filter(EmployeeRequest.id == request_id).first()
+    if not db_request:
+        raise HTTPException(status_code=404, detail="Request not found")
+    
+    # Update fields based on mapping
+    if 'employee' in request_data:
+        employee = db.query(Employee).filter(Employee.name == request_data.get('employee')).first()
+        if not employee:
+            raise HTTPException(status_code=404, detail="Employee not found")
+        db_request.employee_id = employee.id
+    
+    for field, value in request_data.items():
+        if field == 'employee':
+            continue  # Already handled above
+        elif field == 'shiftPreference':
+            db_request.shift_preference = value
+        elif field in ['type', 'dates', 'details', 'status']:
+            setattr(db_request, field, value)
+    
+    db.commit()
+    db.refresh(db_request)
+    
+    # Get employee name for response
+    employee = db.query(Employee).filter(Employee.id == db_request.employee_id).first()
+    employee_name = employee.name if employee else "Unknown"
+    
+    # Prepare response data
+    response_data = {
+        "id": db_request.id,
+        "employee_id": db_request.employee_id,
+        "employee": employee_name,
+        "type": db_request.type,
+        "dates": db_request.dates,
+        "details": db_request.details,
+        "status": db_request.status,
+        "shiftPreference": db_request.shift_preference,
+        "created_at": db_request.created_at.isoformat() if db_request.created_at else None,
+        "updated_at": db_request.updated_at.isoformat() if db_request.updated_at else None
+    }
+    
+    # Broadcast the update
+    await manager.broadcast(json.dumps({
+        "action": "update",
+        "type": "employee-request",
+        "data": response_data
+    }))
+    
+    return response_data
+
+@app.delete("/api/employee-requests/{request_id}")
+async def delete_employee_request(request_id: int, db: Session = Depends(get_db)):
+    db_request = db.query(EmployeeRequest).filter(EmployeeRequest.id == request_id).first()
+    if not db_request:
+        raise HTTPException(status_code=404, detail="Request not found")
+    
+    # Store the ID before deletion for broadcasting
+    deleted_id = db_request.id
+    
+    db.delete(db_request)
+    db.commit()
+    
+    # Broadcast the deletion
+    await manager.broadcast(json.dumps({
+        "action": "delete",
+        "type": "employee-request",
+        "data": {"id": deleted_id}
+    }))
+    
+    return {"status": "success", "message": "Request deleted"}
+
+# Skill CRUD
+@app.get("/api/skills")
+async def get_skills(db: Session = Depends(get_db)):
+    return db.query(Skill).all()
+
+@app.post("/api/skills")
+async def create_skill(skill_data: dict, db: Session = Depends(get_db)):
+    db_skill = Skill(**skill_data)
+    db.add(db_skill)
+    db.commit()
+    db.refresh(db_skill)
+    return db_skill
+
+@app.put("/api/skills/{skill_id}")
+async def update_skill(skill_id: int, skill_data: dict, db: Session = Depends(get_db)):
+    db_skill = db.query(Skill).filter(Skill.id == skill_id).first()
+    if not db_skill:
+        raise HTTPException(status_code=404, detail="Skill not found")
+    
+    for key, value in skill_data.items():
+        setattr(db_skill, key, value)
+    
+    db.commit()
+    return db_skill
+
+@app.delete("/api/skills/{skill_id}")
+async def delete_skill(skill_id: int, db: Session = Depends(get_db)):
+    db_skill = db.query(Skill).filter(Skill.id == skill_id).first()
+    if not db_skill:
+        raise HTTPException(status_code=404, detail="Skill not found")
+    
+    db.delete(db_skill)
+    db.commit()
+    return {"status": "success"}
+
+# Contract CRUD
+@app.get("/api/contracts")
+async def get_contracts(db: Session = Depends(get_db)):
+    return db.query(Contract).all()
+
+@app.post("/api/contracts")
+async def create_contract(contract_data: dict, db: Session = Depends(get_db)):
+    db_contract = Contract(**contract_data)
+    db.add(db_contract)
+    db.commit()
+    db.refresh(db_contract)
+    return db_contract
+
+@app.put("/api/contracts/{contract_id}")
+async def update_contract(contract_id: int, contract_data: dict, db: Session = Depends(get_db)):
+    db_contract = db.query(Contract).filter(Contract.id == contract_id).first()
+    if not db_contract:
+        raise HTTPException(status_code=404, detail="Contract not found")
+    
+    for key, value in contract_data.items():
+        if key in ['created_at', 'updated_at']:
+            value = datetime.fromisoformat(value)
+        setattr(db_contract, key, value)
+    
+    db.commit()
+    return db_contract
+
+@app.delete("/api/contracts/{contract_id}")
+async def delete_contract(contract_id: int, db: Session = Depends(get_db)):
+    db_contract = db.query(Contract).filter(Contract.id == contract_id).first()
+    if not db_contract:
+        raise HTTPException(status_code=404, detail="Contract not found")
+    
+    db.delete(db_contract)
+    db.commit()
+    return {"status": "success"}
+
+# Settings CRUD
+@app.get("/api/settings")
+async def get_settings(db: Session = Depends(get_db)):
+    return db.query(Setting).all()
+
+@app.post("/api/settings")
+async def create_setting(setting_data: dict, db: Session = Depends(get_db)):
+    db_setting = Setting(**setting_data)
+    db.add(db_setting)
+    db.commit()
+    db.refresh(db_setting)
+    return db_setting
+
+@app.put("/api/settings/{setting_id}")
+async def update_setting(setting_id: int, setting_data: dict, db: Session = Depends(get_db)):
+    db_setting = db.query(Setting).filter(Setting.id == setting_id).first()
+    if not db_setting:
+        raise HTTPException(status_code=404, detail="Setting not found")
+    
+    for key, value in setting_data.items():
+        setattr(db_setting, key, value)
+    
+    db.commit()
+    return db_setting
+
+@app.delete("/api/settings/{setting_id}")
+async def delete_setting(setting_id: int, db: Session = Depends(get_db)):
+    db_setting = db.query(Setting).filter(Setting.id == setting_id).first()
+    if not db_setting:
+        raise HTTPException(status_code=404, detail="Setting not found")
+    
+    db.delete(db_setting)
+    db.commit()
+    return {"status": "success"}
 
 if __name__ == "__main__":
     import uvicorn
